@@ -1221,10 +1221,13 @@ String getNextOnlineTimeForMQTT() {
     time_t nextWakeEpoch = now + secondsUntilNextWake;
     
     struct tm *ti = localtime(&nextWakeEpoch);
-    char timestamp[25];
-    snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
-             ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
-             ti->tm_hour, ti->tm_min, ti->tm_sec);
+    char timestamp[30];
+    snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+             ti->tm_mday,
+             ti->tm_mon + 1,
+             ti->tm_year + 1900,
+             ti->tm_hour,
+             ti->tm_min);
     
     return String(timestamp);
   } else {
@@ -1238,10 +1241,13 @@ String getNextOnlineTimeForMQTT() {
     time_t nextActiveEpoch = now + secondsUntilNextActive;
     
     struct tm *ti = localtime(&nextActiveEpoch);
-    char timestamp[25];
-    snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
-             ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
-             ti->tm_hour, ti->tm_min, ti->tm_sec);
+    char timestamp[30];
+    snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+             ti->tm_mday,
+             ti->tm_mon + 1,
+             ti->tm_year + 1900,
+             ti->tm_hour,
+             ti->tm_min);
     
     return String(timestamp);
   }
