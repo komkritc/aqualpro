@@ -1,46 +1,63 @@
-# AquaLevel Pro – ESP32 Aqual Monitoring System
+# AquaLevel Pro – ESP32 Aqual Level Monitor
 
 ![Dashboard Screenshot](/images/screenshot1.png)
 
-A smart, battery-aware water level monitor for residential or industrial tanks—powered by ESP32 with deep sleep, MQTT, OTA, and a responsive web dashboard.
+A smart, battery-aware water level monitoring system for residential or industrial tanks—built on ESP32 with deep sleep, MQTT, OTA updates, and a responsive web dashboard.
 
 ## ✨ Features
 
-- Real-time water level & volume calculation
-- Built-in support for common tank sizes (500L–2000L) or custom dimensions
-- Battery monitoring via AXP192/AXP202 (for TTGO T-Call/SIM800L boards)
-- **15-minute active window** + **20-minute deep sleep** (configurable)
-- MQTT publishing to `test.mosquitto.org` (or your own broker)
-- Web UI with live gauge, tank visualization, and system stats
-- ESP-NOW peer support for remote queries
-- OTA updates, WiFi setup, calibration, and benchmarking tools
-- Serial CLI for diagnostics (`read`, `benchmark`, `battery`, etc.)
+- Real-time water **level** and **volume** calculation
+- Built-in presets for common tank sizes (500L–2000L) or **custom dimensions**
+- **Battery monitoring** via AXP192/AXP202 (optimized for TTGO T-Call boards)
+- **Smart deep sleep**: 15-minute active window + 20-minute sleep (configurable)
+- **MQTT publishing** to `test.mosquitto.org` (or your own broker)
+- **Responsive web UI** with live gauge, tank visualization, and system stats
+- **ESP-NOW support** for remote sensor queries
+- **OTA updates**, WiFi setup, calibration, and benchmarking tools
+- **Serial CLI** for diagnostics: `read`, `benchmark`, `battery`, `reset`, etc.
 
 ## 📦 Hardware
 
-- ESP32 (e.g., TTGO T-Call with AXP192)
-- UART-based ultrasonic sensor (9600 baud, 0x55 trigger protocol)
-- Li-ion battery (optional but recommended for sleep mode)
+- ESP32 (e.g., **TTGO T-Call** with AXP192 power management)
+- **UART-based ultrasonic sensor** (e.g., JSN-SR04T, 9600 baud, `0x55` protocol)
+- Li-ion battery (recommended for sleep mode)
+
+### Pinout
+
+| Function       | ESP32 Pin |
+|----------------|-----------|
+| Sensor TX      | GPIO 18   |
+| Sensor RX      | GPIO 19   |
+| Force AP Mode  | GPIO 27   |
+| Blue LED       | GPIO 12   |
+| Red LED        | GPIO 14   |
+| Green LED      | GPIO 15   |
+| I²C SDA (AXP)  | GPIO 21   |
+| I²C SCL (AXP)  | GPIO 22   |
+
+> **Note**: The TTGO T-Call board includes built-in power management (AXP192) and LEDs—no external components needed.
 
 ## ⚙️ Setup
 
-1. Upload the code via Arduino IDE (ensure ESP32 board support is installed)
+1. Flash the firmware using Arduino IDE (ESP32 board support required)
 2. On first boot:
-   - If no WiFi is saved, it creates an AP: **`AquaLevelPro_XXXX`** / password: `12345678`
+   - If no WiFi is saved, it creates an AP: **`AquaLevelPro_XXXX`**  
+     **Password**: `12345678`
    - Visit `http://192.168.4.1` to configure WiFi, tank size, sleep, and MQTT
-3. Once connected, access the dashboard via your local IP
-4. Default OTA password: `12345678`
+3. After setup, access the dashboard via your local IP
+4. **OTA password**: `12345678`
 
-## 🔋 Battery & Sleep
+## 🔋 Battery & Sleep Logic
 
 - Deep sleep conserves power between active windows
-- Auto-enters extended sleep if battery < 3.0V
-- Real-time battery voltage and % shown on dashboard
+- Auto-enters **1-hour deep sleep** if battery drops below **3.0V**
+- Battery voltage and charge % displayed on dashboard
+- Sleep schedule fully configurable via web UI
 
 ## 🌐 MQTT Output
 
-**Topic:** `{device_name}/status`  
-**Payload example:**
+**Topic**: `{device_name}/status`  
+**Example payload**:
 ```json
 {
   "timestamp": "05-12-2025T14:30",
