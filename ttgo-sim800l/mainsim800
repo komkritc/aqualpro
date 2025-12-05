@@ -7,7 +7,9 @@
  * Added: Deep sleep with 15min active window + 20min sleep
  * Added: AXP192 battery monitoring for TTGO SIM800L
  * GPIO: RX=19, TX=18, ForceAP=35, LEDs: 12,14,15
+ * C:\Users\komkritc\OneDrive\Documents\Arduino\aqualpro
  */
+
 
 #include <WiFi.h>
 #include <esp_now.h>
