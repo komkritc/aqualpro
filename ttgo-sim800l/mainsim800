@@ -2701,10 +2701,10 @@ void setup() {
   // Check battery status immediately
   checkBattery();
 
-  // if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
-  //   Serial.println("CRITICAL: Battery too low. Going to deep sleep immediately.");
-  //   esp_deep_sleep(3600000000);  // 1 hour sleep
-  // }
+  if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
+    Serial.println("CRITICAL: Battery too low. Going to deep sleep immediately.");
+    esp_deep_sleep(3600000000);  // 1 hour sleep
+  }
 
   initializePreferences();
   loadConfig();
