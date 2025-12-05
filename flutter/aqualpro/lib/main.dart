@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -44,6 +45,9 @@ class _TankDashboardState extends State<TankDashboard>
   // MQTT
   MqttServerClient? _client;
   bool _connected = false;
+  bool _connecting = false;
+  StreamSubscription<MqttReceivedMessage<MqttMessage>>? _subscription;
+  Timer? _reconnectTimer;
 
   // Data
   double _level = 0.0; // 0..1
@@ -64,20 +68,23 @@ class _TankDashboardState extends State<TankDashboard>
   String _mqttTopic = 'AquaSim800/status';
   final TextEditingController _topicController = TextEditingController();
   final _prefsKey = 'mqtt_topic';
+  final _broker = 'test.mosquitto.org';
+  final _port = 1883;
 
   @override
   void initState() {
     super.initState();
-    _waveController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2500),
-    )
-      ..addListener(() {
-        setState(() {
-          _phase = (_phase + 2 * math.pi / 120.0) % (2 * math.pi);
-        });
-      })
-      ..repeat();
+    _waveController =
+        AnimationController(
+            vsync: this,
+            duration: const Duration(milliseconds: 2500),
+          )
+          ..addListener(() {
+            setState(() {
+              _phase = (_phase + 2 * math.pi / 120.0) % (2 * math.pi);
+            });
+          })
+          ..repeat();
 
     _loadSavedTopic();
   }
@@ -96,7 +103,7 @@ class _TankDashboardState extends State<TankDashboard>
       print('Error loading saved topic: $e');
     }
 
-    // Connect after loading the topic
+    // Start connection in background without blocking UI
     _connectMQTT();
   }
 
@@ -139,10 +146,9 @@ class _TankDashboardState extends State<TankDashboard>
                   });
                   _saveTopic(newTopic);
 
-                  // Reconnect with new topic
+                  // Resubscribe with new topic
                   if (_connected) {
-                    _client?.unsubscribe(_mqttTopic);
-                    _client?.subscribe(_mqttTopic, MqttQos.atLeastOnce);
+                    _resubscribe();
                   }
 
                   Navigator.of(context).pop();
@@ -156,97 +162,179 @@ class _TankDashboardState extends State<TankDashboard>
   }
 
   Future<void> _connectMQTT() async {
+    if (_connecting) return;
+
     setState(() {
-      _connected = false;
+      _connecting = true;
       _rawJson = 'Connecting...';
     });
 
-    _client = MqttServerClient('test.mosquitto.org', '');
-    _client?.port = 1883;
+    // Cancel any existing reconnect timer
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
 
-    final clientId = 'flutter_tank_${DateTime.now().millisecondsSinceEpoch}';
-    _client?.clientIdentifier = clientId;
+    // Disconnect existing connection
+    await _disconnectMQTT();
 
+    // Create new client
+    _client = MqttServerClient(_broker, '');
+    _client?.port = _port;
+    _client?.keepAlivePeriod = 60;
     _client?.logging(on: false);
-    _client?.keepAlivePeriod = 30;
     _client?.onDisconnected = _onDisconnected;
+    _client?.onConnected = _onConnected;
 
+    // Set connection options
     final connMess = MqttConnectMessage()
-        .withClientIdentifier(clientId)
+        .withClientIdentifier(
+          'flutter_tank_${DateTime.now().millisecondsSinceEpoch}',
+        )
         .startClean()
         .withWillQos(MqttQos.atLeastOnce);
 
     _client?.connectionMessage = connMess;
 
     try {
-      await _client?.connect();
-      setState(() {
-        _connected = true;
-        _rawJson = 'Connected to test.mosquitto.org';
-      });
-
-      _client?.subscribe(_mqttTopic, MqttQos.atLeastOnce);
-
-      _client?.updates?.listen((messages) {
-        if (messages == null || messages.isEmpty) return;
-
-        final recMess = messages[0].payload as MqttPublishMessage;
-        final pt = MqttPublishPayload.bytesToStringAsString(
-          recMess.payload.message,
-        );
-
-        setState(() {
-          _rawJson = pt;
-        });
-
-        try {
-          final data = jsonDecode(pt) as Map<String, dynamic>;
-          final levelPct =
-              double.tryParse(data['level_percent'].toString()) ?? 0.0;
-          setState(() {
-            _level = levelPct.clamp(0.0, 100.0) / 100.0;
-            _volumeLiters =
-                double.tryParse(data['volume_liters'].toString()) ?? 0.0;
-            _timestamp = (data['timestamp'] ?? '--').toString();
-            _ip = (data['ip_address'] ?? '-').toString();
-            _device = (data['device'] ?? '-').toString();
-
-            // Battery data
-            _batteryVoltage =
-                double.tryParse(data['battery_voltage'].toString()) ?? 0.0;
-            _batteryPercentage =
-                int.tryParse(data['battery_percentage'].toString()) ?? 0;
-            _batteryStatus = (data['battery_status'] ?? '--').toString();
-            _nextOnline = (data['next_online'] ?? '--').toString();
-            _uptime = (data['uptime'] ?? '--').toString();
-          });
-        } catch (e) {
-          print('Parse error: $e');
-          setState(() {
-            _rawJson = 'Invalid JSON: $pt';
-          });
-        }
-      });
+      // Connect with timeout
+      await _client?.connect().timeout(const Duration(seconds: 10));
+    } on TimeoutException catch (_) {
+      _handleConnectionError('Connection timeout');
     } on Exception catch (e) {
-      print('MQTT Error: $e');
-      setState(() {
-        _connected = false;
-        _rawJson = 'Failed: $e';
-      });
+      _handleConnectionError('MQTT Error: $e');
     }
   }
 
-  void _onDisconnected() {
+  void _onConnected() {
+    if (_client == null) return;
+
     setState(() {
-      _connected = false;
-      _rawJson = 'Disconnected';
+      _connected = true;
+      _connecting = false;
+      _rawJson = 'Connected to $_broker';
     });
+
+    // Subscribe to topic
+    _client?.subscribe(_mqttTopic, MqttQos.atLeastOnce);
+
+    // Listen for messages
+    _subscription =
+        _client?.updates?.listen(_handleMessage)
+            as StreamSubscription<MqttReceivedMessage<MqttMessage>>?;
+  }
+
+  void _handleMessage(List<MqttReceivedMessage<MqttMessage>> messages) {
+    if (messages.isEmpty) return;
+
+    final recMess = messages[0].payload as MqttPublishMessage;
+    final payload = MqttPublishPayload.bytesToStringAsString(
+      recMess.payload.message,
+    );
+
+    // Update UI in setState to avoid async issues
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      setState(() {
+        _rawJson = payload;
+      });
+
+      try {
+        final data = jsonDecode(payload) as Map<String, dynamic>;
+        final levelPct =
+            double.tryParse(data['level_percent'].toString()) ?? 0.0;
+
+        setState(() {
+          _level = levelPct.clamp(0.0, 100.0) / 100.0;
+          _volumeLiters =
+              double.tryParse(data['volume_liters'].toString()) ?? 0.0;
+          _timestamp = (data['timestamp'] ?? '--').toString();
+          _ip = (data['ip_address'] ?? '-').toString();
+          _device = (data['device'] ?? '-').toString();
+
+          // Battery data
+          _batteryVoltage =
+              double.tryParse(data['battery_voltage'].toString()) ?? 0.0;
+          _batteryPercentage =
+              int.tryParse(data['battery_percentage'].toString()) ?? 0;
+          _batteryStatus = (data['battery_status'] ?? '--').toString();
+          _nextOnline = (data['next_online'] ?? '--').toString();
+          _uptime = (data['uptime'] ?? '--').toString();
+        });
+      } catch (e) {
+        print('Parse error: $e');
+        setState(() {
+          _rawJson = 'Invalid JSON: $payload';
+        });
+      }
+    });
+  }
+
+  void _handleConnectionError(String error) {
+    print(error);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      setState(() {
+        _connected = false;
+        _connecting = false;
+        _rawJson = error;
+      });
+
+      // Schedule reconnect after 5 seconds
+      _scheduleReconnect();
+    });
+  }
+
+  void _scheduleReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(const Duration(seconds: 5), () {
+      if (!_connected && !_connecting && mounted) {
+        _connectMQTT();
+      }
+    });
+  }
+
+  void _onDisconnected() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      setState(() {
+        _connected = false;
+        _connecting = false;
+        _rawJson = 'Disconnected';
+      });
+
+      // Schedule reconnect
+      _scheduleReconnect();
+    });
+  }
+
+  Future<void> _disconnectMQTT() async {
+    _subscription?.cancel();
+    _subscription = null;
+
+    try {
+      if (_client?.connectionStatus?.state == MqttConnectionState.connected) {
+        _client?.disconnect();
+      }
+    } catch (e) {
+      print('Error disconnecting: $e');
+    }
+  }
+
+  void _resubscribe() {
+    if (_client?.connectionStatus?.state == MqttConnectionState.connected) {
+      _client?.subscribe(_mqttTopic, MqttQos.atLeastOnce);
+    }
   }
 
   @override
   void dispose() {
     _waveController.dispose();
-    _client?.disconnect();
+    _reconnectTimer?.cancel();
+    _subscription?.cancel();
+    _disconnectMQTT();
     _topicController.dispose();
     super.dispose();
   }
@@ -266,12 +354,12 @@ class _TankDashboardState extends State<TankDashboard>
           ),
           IconButton(
             tooltip: "Reconnect",
-            icon: Icon(_connected ? Icons.refresh : Icons.power),
-            onPressed: _connectMQTT,
+            icon: Icon(_connecting ? Icons.refresh : Icons.power),
+            onPressed: _connecting ? null : _connectMQTT,
           ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
-            child: _StatusDot(connected: _connected),
+            child: _StatusDot(connected: _connected, connecting: _connecting),
           ),
         ],
       ),
@@ -287,8 +375,8 @@ class _TankDashboardState extends State<TankDashboard>
                   LayoutBuilder(
                     builder: (context, constraints) {
                       final isWide = constraints.maxWidth > 720;
-                      final tankWidth = isWide ? 220.0 : 180.0;
-                      final tankHeight = isWide ? 420.0 : 360.0;
+                      final tankWidth = isWide ? 198.0 : 162.0;
+                      final tankHeight = isWide ? 378.0 : 324.0;
 
                       return Center(
                         child: TankCard(
@@ -301,7 +389,7 @@ class _TankDashboardState extends State<TankDashboard>
                       );
                     },
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 15),
 
                   // Information card
                   InfoCard(
@@ -311,13 +399,14 @@ class _TankDashboardState extends State<TankDashboard>
                     ip: _ip,
                     device: _device,
                     connected: _connected,
+                    connecting: _connecting,
                     batteryVoltage: _batteryVoltage,
                     batteryPercentage: _batteryPercentage,
                     batteryStatus: _batteryStatus,
                     nextOnline: _nextOnline,
                     uptime: _uptime,
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 15),
 
                   // Raw JSON data
                   Container(
@@ -382,14 +471,26 @@ class _TankDashboardState extends State<TankDashboard>
                 const SizedBox(width: 16),
                 Row(
                   children: [
-                    Icon(
-                      _connected ? Icons.cloud_done : Icons.cloud_off,
-                      color: _connected ? cs.primary : cs.error,
-                      size: 16,
-                    ),
+                    if (_connecting)
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+                        ),
+                      )
+                    else
+                      Icon(
+                        _connected ? Icons.cloud_done : Icons.cloud_off,
+                        color: _connected ? cs.primary : cs.error,
+                        size: 16,
+                      ),
                     const SizedBox(width: 6),
                     Text(
-                      _connected ? 'Online' : 'Offline',
+                      _connecting
+                          ? 'Connecting...'
+                          : (_connected ? 'Online' : 'Offline'),
                       style: TextStyle(
                         color: cs.onSurfaceVariant,
                         fontSize: 11,
@@ -466,6 +567,7 @@ class InfoCard extends StatelessWidget {
   final String ip;
   final String device;
   final bool connected;
+  final bool connecting;
   final double batteryVoltage;
   final int batteryPercentage;
   final String batteryStatus;
@@ -480,6 +582,7 @@ class InfoCard extends StatelessWidget {
     required this.ip,
     required this.device,
     required this.connected,
+    required this.connecting,
     required this.batteryVoltage,
     required this.batteryPercentage,
     required this.batteryStatus,
@@ -584,14 +687,9 @@ class InfoCard extends StatelessWidget {
 
           // Battery info section with divider
           const Divider(),
-          // const SizedBox(height: 8),
-          // const Text(
-          //   'Device Information',
-          //   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-          // ),
           const SizedBox(height: 8),
 
-          // Battery details in two columns
+          // Battery details
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -600,28 +698,20 @@ class InfoCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _kv('Voltage', '${batteryVoltage.toStringAsFixed(2)} V'),
-                    //const SizedBox(height: 8),
-                    //_kv('Status', batteryStatus),
                   ],
                 ),
               ),
-              //const SizedBox(width: 10),
-              // Expanded(
-              //   child: Column(
-              //     crossAxisAlignment: CrossAxisAlignment.start,
-              //     children: [
-              //       //_kv('Percentage', '$batteryPercentage%'),
-              //       const SizedBox(height: 8),
-              //       _kv('Next Online', nextOnline),
-              //     ],
-              //   ),
-              // ),
             ],
           ),
           const SizedBox(height: 10),
 
           // Status
-          _kv('Connection', connected ? 'Connected' : 'Disconnected'),
+          _kv(
+            'Connection',
+            connecting
+                ? 'Connecting...'
+                : (connected ? 'Connected' : 'Disconnected'),
+          ),
         ],
       ),
     );
@@ -643,11 +733,25 @@ class InfoCard extends StatelessWidget {
 
 class _StatusDot extends StatelessWidget {
   final bool connected;
+  final bool connecting;
 
-  const _StatusDot({required this.connected});
+  const _StatusDot({required this.connected, this.connecting = false});
 
   @override
   Widget build(BuildContext context) {
+    if (connecting) {
+      return SizedBox(
+        width: 16,
+        height: 16,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          valueColor: AlwaysStoppedAnimation<Color>(
+            Theme.of(context).colorScheme.primary,
+          ),
+        ),
+      );
+    }
+
     return Row(
       children: [
         Container(
@@ -655,8 +759,9 @@ class _StatusDot extends StatelessWidget {
           height: 8,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color:
-                connected ? Colors.green : Theme.of(context).colorScheme.error,
+            color: connected
+                ? Colors.green
+                : Theme.of(context).colorScheme.error,
           ),
         ),
         const SizedBox(width: 6),
@@ -758,18 +863,19 @@ class CylindricalTankPainter extends CustomPainter {
 
     // Gloss highlight
     final glossPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.centerLeft,
-        end: Alignment.centerRight,
-        colors: [Colors.white.withOpacity(0.18), Colors.transparent],
-      ).createShader(
-        Rect.fromLTWH(
-          innerRect.left,
-          innerRect.top,
-          innerRect.width * 0.3,
-          innerRect.height,
-        ),
-      );
+      ..shader =
+          LinearGradient(
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+            colors: [Colors.white.withOpacity(0.18), Colors.transparent],
+          ).createShader(
+            Rect.fromLTWH(
+              innerRect.left,
+              innerRect.top,
+              innerRect.width * 0.3,
+              innerRect.height,
+            ),
+          );
     canvas.drawRRect(
       RRect.fromLTRBR(
         innerRect.left,
