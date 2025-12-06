@@ -2467,6 +2467,7 @@ String getCustomTimestamp() {
   return String(timestamp);
 }
 
+
 void publishMQTTStatus() {
   if (!mqttClient.connected()) {
     Serial.println("MQTT not connected, skip publish");
@@ -2476,8 +2477,85 @@ void publishMQTTStatus() {
   // Update battery before publishing
   checkBattery();
 
-  char payload[300];
+  char payload[350];  // Increased buffer size for additional field
   String NTPDateTime = getCustomTimestamp();
+  
+  // Calculate next sleep time (when active window ends)
+  unsigned long currentTime = millis();
+  unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
+  unsigned long nextSleepTime = 0;
+  
+  if (deepSleepEnabled) {
+    if (timeSinceActiveStart < activeWindow) {
+      // Still in active window, calculate when sleep will start
+      nextSleepTime = activeWindowStart + activeWindow;
+    } else {
+      // Already past active window (shouldn't happen, but just in case)
+      nextSleepTime = currentTime;
+    }
+  } else {
+    // Sleep disabled, next sleep is "never"
+    nextSleepTime = 0;
+  }
+  
+  // Calculate timestamps for next_sleep and next_online
+  String nextSleepTimestamp = "never";
+  String nextOnlineTimestamp = "always_online";
+  
+  if (deepSleepEnabled) {
+    // Calculate next_sleep timestamp
+    if (nextSleepTime > 0) {
+      time_t now = timeClient.getEpochTime();
+      unsigned long secondsUntilSleep = (nextSleepTime - currentTime) / 1000;
+      time_t sleepEpoch = now + secondsUntilSleep;
+      
+      struct tm *ti = localtime(&sleepEpoch);
+      char timestamp[30];
+      snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+               ti->tm_mday,
+               ti->tm_mon + 1,
+               ti->tm_year + 1900,
+               ti->tm_hour,
+               ti->tm_min);
+      nextSleepTimestamp = String(timestamp);
+    }
+    
+    // Calculate next_online timestamp
+    if (timeSinceActiveStart < activeWindow) {
+      unsigned long nextWakeTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
+      
+      time_t now = timeClient.getEpochTime();
+      unsigned long secondsUntilNextWake = (nextWakeTime - currentTime) / 1000;
+      time_t nextWakeEpoch = now + secondsUntilNextWake;
+      
+      struct tm *ti = localtime(&nextWakeEpoch);
+      char timestamp[30];
+      snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+               ti->tm_mday,
+               ti->tm_mon + 1,
+               ti->tm_year + 1900,
+               ti->tm_hour,
+               ti->tm_min);
+      nextOnlineTimestamp = String(timestamp);
+    } else {
+      // Already sleeping, next online is after sleep duration
+      unsigned long sleepEndTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
+      
+      time_t now = timeClient.getEpochTime();
+      unsigned long secondsUntilNextActive = (sleepEndTime - currentTime) / 1000;
+      time_t nextActiveEpoch = now + secondsUntilNextActive;
+      
+      struct tm *ti = localtime(&nextActiveEpoch);
+      char timestamp[30];
+      snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+               ti->tm_mday,
+               ti->tm_mon + 1,
+               ti->tm_year + 1900,
+               ti->tm_hour,
+               ti->tm_min);
+      nextOnlineTimestamp = String(timestamp);
+    }
+  }
 
   snprintf(payload, sizeof(payload),
            "{\"timestamp\":\"%s\","
@@ -2490,6 +2568,7 @@ void publishMQTTStatus() {
            "\"battery_voltage\":%.2f,"
            "\"battery_percentage\":%.0f,"
            "\"battery_status\":\"%s\","
+           "\"next_sleep\":\"%s\","
            "\"next_online\":\"%s\"}",
            NTPDateTime.c_str(),
            formatRuntime(millis()).c_str(),
@@ -2501,7 +2580,8 @@ void publishMQTTStatus() {
            batteryVoltage,
            batteryPercentage,
            getBatteryStatusString().c_str(),
-           getNextOnlineTimeForMQTT().c_str());
+           nextSleepTimestamp.c_str(),
+           nextOnlineTimestamp.c_str());
 
   if (mqttClient.publish(PubTopic, 0, true, payload)) {
     Serial.println("MQTT published: " + String(payload));
@@ -2509,6 +2589,7 @@ void publishMQTTStatus() {
     Serial.println("MQTT publish failed");
   }
 }
+
 
 //=============== MQTT functions ====================
 void printSeparationLine() {

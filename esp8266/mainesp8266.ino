@@ -1162,17 +1162,22 @@ String getNextOnlineTime() {
     return "Always online (sleep disabled)";
   }
   
-  // Calculate when the device will be online next
   unsigned long currentTime = millis();
   unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
   
   if (timeSinceActiveStart < activeWindow) {
-    // Still in active window, next sleep will be at activeWindowStart + activeWindow
-    // Then wake up after sleepDuration
-    unsigned long nextWakeTime = activeWindowStart + activeWindow + (sleepDuration / 1000); // Convert microseconds to milliseconds
+    // Still in active window
+    unsigned long nextWakeTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
     
-    // Convert to human readable time
-    time_t now = timeClient.getEpochTime();
+    // Get current time
+    time_t now;
+    if (timeClient.isTimeSet()) {
+      now = timeClient.getEpochTime();
+    } else {
+      // Fallback to rough estimate based on uptime
+      now = 1700000000 + (currentTime / 1000);
+    }
+    
     unsigned long secondsUntilNextWake = (nextWakeTime - currentTime) / 1000;
     time_t nextWakeEpoch = now + secondsUntilNextWake;
     
@@ -1183,12 +1188,19 @@ String getNextOnlineTime() {
     
     return String(timeStr);
   } else {
-    // Should be sleeping now, calculate next active time
+    // Should be sleeping now
     unsigned long sleepEndTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
     unsigned long nextActiveTime = sleepEndTime;
     
-    // Convert to human readable time
-    time_t now = timeClient.getEpochTime();
+    // Get current time
+    time_t now;
+    if (timeClient.isTimeSet()) {
+      now = timeClient.getEpochTime();
+    } else {
+      // Fallback to rough estimate based on uptime
+      now = 1700000000 + (currentTime / 1000);
+    }
+    
     unsigned long secondsUntilNextActive = (nextActiveTime - currentTime) / 1000;
     time_t nextActiveEpoch = now + secondsUntilNextActive;
     
@@ -1211,12 +1223,18 @@ String getNextOnlineTimeForMQTT() {
   unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
   
   if (timeSinceActiveStart < activeWindow) {
-    // Still in active window, next sleep will be at activeWindowStart + activeWindow
-    // Then wake up after sleepDuration
+    // Still in active window
     unsigned long nextWakeTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
     
-    // Convert to timestamp
-    time_t now = timeClient.getEpochTime();
+    // Get current epoch time
+    time_t now;
+    if (timeClient.isTimeSet()) {
+      now = timeClient.getEpochTime();
+    } else {
+      // Fallback to rough estimate based on uptime
+      now = 1700000000 + (currentTime / 1000); // Base timestamp + uptime
+    }
+    
     unsigned long secondsUntilNextWake = (nextWakeTime - currentTime) / 1000;
     time_t nextWakeEpoch = now + secondsUntilNextWake;
     
@@ -1235,8 +1253,15 @@ String getNextOnlineTimeForMQTT() {
     unsigned long sleepEndTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
     unsigned long nextActiveTime = sleepEndTime;
     
-    // Convert to timestamp
-    time_t now = timeClient.getEpochTime();
+    // Get current epoch time
+    time_t now;
+    if (timeClient.isTimeSet()) {
+      now = timeClient.getEpochTime();
+    } else {
+      // Fallback to rough estimate based on uptime
+      now = 1700000000 + (currentTime / 1000);
+    }
+    
     unsigned long secondsUntilNextActive = (nextActiveTime - currentTime) / 1000;
     time_t nextActiveEpoch = now + secondsUntilNextActive;
     
@@ -1252,8 +1277,6 @@ String getNextOnlineTimeForMQTT() {
     return String(timestamp);
   }
 }
-
-
 
 // ===== UTILITY FUNCTIONS =====
 void blinkBlueLED(int count, int delayTime = 200) {
@@ -2523,40 +2546,92 @@ void handleSensorReading() {
 }
 
 String getCustomTimestamp() {
-  timeClient.update();
-
-  // Get individual time components
-  int day = timeClient.getDay();
-  int hours = timeClient.getHours();
-  int minutes = timeClient.getMinutes();
-
-  // Get date components (month starts from 0)
+  if (!timeClient.isTimeSet()) {
+    // Try to update time once
+    timeClient.update();
+    
+    // If still not set, return uptime-based timestamp
+    if (!timeClient.isTimeSet()) {
+      unsigned long uptime = millis();
+      unsigned long hours = uptime / 3600000;
+      unsigned long minutes = (uptime % 3600000) / 60000;
+      
+      char timestamp[20];
+      snprintf(timestamp, sizeof(timestamp),
+               "UP%03lu:%02lu",
+               hours, minutes);
+      
+      return String(timestamp);
+    }
+  }
+  
+  // Get NTP time
   time_t rawtime = timeClient.getEpochTime();
-  struct tm *ti;
-  ti = localtime(&rawtime);
-
+  struct tm *ti = localtime(&rawtime);
+  
   char timestamp[20];
   snprintf(timestamp, sizeof(timestamp),
            "%02d-%02d-%04dT%02d:%02d",
-           ti->tm_mday,         // Day of month (1-31)
-           ti->tm_mon + 1,      // Month (0-11) + 1
-           ti->tm_year + 1900,  // Year (since 1900)
-           hours,
-           minutes);
-
+           ti->tm_mday,
+           ti->tm_mon + 1,
+           ti->tm_year + 1900,
+           ti->tm_hour,
+           ti->tm_min);
+  
   return String(timestamp);
 }
 
-
 void publishMQTTStatus() {
-
   if (!mqttClient.connected()) {
     Serial.println("MQTT not connected, skip publish");
     return;
   }
 
-  char payload[256];  // Adjust size as needed
-  String NTPDateTime = getCustomTimestamp();
+  char payload[256];
+  
+  // Try to get NTP time, but fallback to millis() if not synced
+  String timestamp = getCustomTimestamp();
+
+  // Get formatted uptime
+  String uptimeStr = formatRuntime(millis());
+
+  // Calculate next sleep time
+  String nextSleepTime;
+  if (deepSleepEnabled) {
+    unsigned long currentTime = millis();
+    unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
+    
+    if (timeSinceActiveStart < activeWindow) {
+      // Still in active window
+      unsigned long sleepStartTime = activeWindowStart + activeWindow;
+      time_t now;
+      if (timeClient.isTimeSet()) {
+        now = timeClient.getEpochTime();
+      } else {
+        now = 1700000000 + (currentTime / 1000);
+      }
+      unsigned long secondsUntilSleep = (sleepStartTime - currentTime) / 1000;
+      time_t sleepStartEpoch = now + secondsUntilSleep;
+      
+      struct tm *ti = localtime(&sleepStartEpoch);
+      char sleepTimeStr[30];
+      snprintf(sleepTimeStr, sizeof(sleepTimeStr), "%02d-%02d-%04dT%02d:%02d",
+               ti->tm_mday,
+               ti->tm_mon + 1,
+               ti->tm_year + 1900,
+               ti->tm_hour,
+               ti->tm_min);
+      nextSleepTime = String(sleepTimeStr);
+    } else {
+      // Should already be sleeping
+      nextSleepTime = "sleeping_now";
+    }
+  } else {
+    nextSleepTime = "always_online";
+  }
+
+  // Calculate next wake time for "next_online"
+  String nextOnlineTime = getNextOnlineTimeForMQTT();
 
   snprintf(payload, sizeof(payload),
            "{\"timestamp\":\"%s\","
@@ -2566,15 +2641,17 @@ void publishMQTTStatus() {
            "\"distance_cm\":%.1f,"
            "\"level_percent\":%.1f,"
            "\"volume_liters\":%.1f,"
+           "\"next_sleep\":\"%s\","
            "\"next_online\":\"%s\"}",
-           NTPDateTime.c_str(),
-           formatRuntime(millis()).c_str(),  // Moved right after timestamp
+           timestamp.c_str(),
+           uptimeStr.c_str(),  // Added uptime back here
            deviceName,
            WiFi.localIP().toString().c_str(),
            cm,
            percent,
            volume,
-           getNextOnlineTimeForMQTT().c_str());
+           nextSleepTime.c_str(),
+           nextOnlineTime.c_str());
 
   if (mqttClient.publish(PubTopic, 0, true, payload)) {
     Serial.println("MQTT published: " + String(payload));
@@ -2582,8 +2659,6 @@ void publishMQTTStatus() {
     Serial.println("MQTT publish failed");
   }
 }
-
-
 //=============== start of MQTT funtions ====================
 
 void printSeparationLine() {
@@ -2784,6 +2859,27 @@ bool connectToWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWiFi connected: " + WiFi.localIP().toString());
+    
+    // Initialize and sync NTP time
+    timeClient.begin();
+    timeClient.update();
+    
+    // Wait for time to sync (with timeout)
+    Serial.println("Syncing NTP time...");
+    unsigned long syncStart = millis();
+    while (!timeClient.isTimeSet() && (millis() - syncStart < 10000)) {
+      timeClient.update();
+      delay(1000);
+      Serial.print(".");
+    }
+    
+    if (timeClient.isTimeSet()) {
+      Serial.println("\nNTP time synced!");
+      Serial.printf("Current time: %s\n", timeClient.getFormattedTime().c_str());
+    } else {
+      Serial.println("\nNTP sync failed!");
+    }
+    
     connectToMqtt();
     wifiConnected = true;
     blinkGreenLED(1);
@@ -2979,6 +3075,17 @@ void loop() {
       WiFi.disconnect();
       delay(100);
       connectToWiFi();
+    }
+  }
+
+  // Periodic NTP sync (every hour)
+  static unsigned long lastNTPSync = 0;
+  if (WiFi.status() == WL_CONNECTED && millis() - lastNTPSync >= 3600000) {
+    lastNTPSync = millis();
+    if (timeClient.update()) {
+      Serial.printf("NTP time synced: %s\n", timeClient.getFormattedTime().c_str());
+    } else {
+      Serial.println("NTP sync failed");
     }
   }
 
