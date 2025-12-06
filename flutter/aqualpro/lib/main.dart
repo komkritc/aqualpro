@@ -62,6 +62,7 @@ class _TankDashboardState extends State<TankDashboard>
   int _batteryPercentage = 0;
   String _batteryStatus = '--';
   String _nextOnline = '--';
+  String _nextSleep = '--'; // NEW: Added next_sleep field
   String _uptime = '--';
 
   // Configuration
@@ -258,6 +259,8 @@ class _TankDashboardState extends State<TankDashboard>
               int.tryParse(data['battery_percentage'].toString()) ?? 0;
           _batteryStatus = (data['battery_status'] ?? '--').toString();
           _nextOnline = (data['next_online'] ?? '--').toString();
+          _nextSleep = (data['next_sleep'] ?? '--')
+              .toString(); // NEW: Added next_sleep
           _uptime = (data['uptime'] ?? '--').toString();
         });
       } catch (e) {
@@ -404,6 +407,7 @@ class _TankDashboardState extends State<TankDashboard>
                     batteryPercentage: _batteryPercentage,
                     batteryStatus: _batteryStatus,
                     nextOnline: _nextOnline,
+                    nextSleep: _nextSleep, // NEW: Added nextSleep
                     uptime: _uptime,
                   ),
                   const SizedBox(height: 15),
@@ -572,6 +576,7 @@ class InfoCard extends StatelessWidget {
   final int batteryPercentage;
   final String batteryStatus;
   final String nextOnline;
+  final String nextSleep; // NEW: Added nextSleep parameter
   final String uptime;
 
   const InfoCard({
@@ -587,6 +592,7 @@ class InfoCard extends StatelessWidget {
     required this.batteryPercentage,
     required this.batteryStatus,
     required this.nextOnline,
+    required this.nextSleep, // NEW: Added nextSleep parameter
     required this.uptime,
   });
 
@@ -677,6 +683,8 @@ class InfoCard extends StatelessWidget {
           const SizedBox(height: 10),
           _kv('Timestamp', timestamp),
           const SizedBox(height: 10),
+          _kv('Next Sleep', nextSleep), // NEW: Added next_sleep display
+          const SizedBox(height: 10),
           _kv('Next Online', nextOnline),
           const SizedBox(height: 10),
           _kv('Uptime', uptime),
@@ -698,6 +706,8 @@ class InfoCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _kv('Voltage', '${batteryVoltage.toStringAsFixed(2)} V'),
+                    const SizedBox(height: 8),
+                    _kv('Status', batteryStatus),
                   ],
                 ),
               ),
