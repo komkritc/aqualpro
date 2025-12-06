@@ -3,9 +3,10 @@
  * Converted from ESP8266 to ESP32
  * Designed by: Komkrit Chooraung
  * Date: 28-Nov-2025
- * Version: 3.0 (ESP32 Port)
+ * Version: 3.2 (ESP32 Dev Board - No AXP)
  * Added: Deep sleep with 15min active window + 20min sleep
- * GPIO: RX=19, TX=18, ForceAP=35, LEDs: 12,14,15
+ * Added: Battery monitoring via ADC with 47K/10K voltage divider
+ * GPIO: RX=19, TX=18, ForceAP=27, Battery=34, LEDs: 12,14,15
  */
 
 #include <WiFi.h>
@@ -29,6 +30,22 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600);  // UTC+7 (Bangkok time)
 #define DEFAULT_SLEEP_DURATION 1200000000  // 20 minutes deep sleep (1200000000 microseconds = 20 * 60 * 1000 * 1000)
 #define DEFAULT_MQTT_INTERVAL 60000        // 1 minute MQTT publish interval
 #define FORCE_WAKE_PIN GPIO_NUM_0          // GPIO0 for wakeup from deep sleep
+
+// --- Battery Monitoring (ADC with 47K/10K voltage divider) ---
+#define BATTERY_PIN 34                   // GPIO34 for ADC battery reading
+#define ADC_RESOLUTION 4095              // 12-bit ADC (0-4095)
+#define ADC_REFERENCE_VOLTAGE 3.3f       // ESP32 ADC reference voltage
+#define VOLTAGE_DIVIDER_RATIO 5.7f       // (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
+#define BATTERY_CALIBRATION_FACTOR 1.0f  // Calibration factor for accuracy
+
+bool hasBatteryMonitoring = true;
+float batteryVoltage = 0.0f;
+float batteryPercentage = 0.0f;
+bool lowBatteryMode = false;
+#define BATTERY_CRITICAL_THRESHOLD 3.0f  // 3.0V - Critical, go to deep sleep
+#define BATTERY_WARNING_THRESHOLD 3.3f   // 3.3V - Warning level
+#define BATTERY_FULL_THRESHOLD 4.2f      // 4.2V - Full (Li-ion battery)
+#define BATTERY_EMPTY_THRESHOLD 3.0f     // 3.0V - Empty
 
 // Preferences keys for sleep configuration
 const char *SLEEP_ENABLED_KEY = "sleep_enabled";
@@ -70,7 +87,7 @@ void updateMQTTTopic() {
 
 #define RX_PIN 19        // GPIO19 for RX (ESP_RX)
 #define TX_PIN 18        // GPIO18 for TX (ESP_TX)
-#define FORCE_AP_PIN 27  // GPIO32 force AP mode
+#define FORCE_AP_PIN 27  // GPIO27 force AP mode (changed from 35)
 #define SENSOR_READ_TIMEOUT 100
 #define SERIAL_INPUT_TIMEOUT 5000
 #define UPDATE_INTERVAL 2000
@@ -381,6 +398,27 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
       text-align: center;
       font-size: 14px;
     }
+    .battery-info {
+      background: #e3f2fd;
+      border: 1px solid #bbdefb;
+      border-radius: 4px;
+      padding: 10px;
+      margin: 10px 0;
+      text-align: center;
+      font-size: 14px;
+    }
+    .battery-level {
+      height: 20px;
+      background: linear-gradient(90deg, #f44336 0%, #ff9800 30%, #4CAF50 100%);
+      border-radius: 3px;
+      margin: 5px 0;
+      overflow: hidden;
+    }
+    .battery-fill {
+      height: 100%;
+      background: #2196F3;
+      transition: width 0.5s ease;
+    }
     .footer {
       margin-top: 2rem;
       padding-top: 1.5rem;
@@ -419,6 +457,17 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
     .footer-meta-item {
       margin: 0.3rem 0;
     }
+    .battery-status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+      margin-left: 5px;
+    }
+    .battery-good { background: #e8f5e8; color: #2e7d32; }
+    .battery-warning { background: #fff3e0; color: #f57c00; }
+    .battery-critical { background: #ffebee; color: #c62828; }
     @media (max-width: 600px) {
       .footer-links {
         gap: 1rem;
@@ -432,6 +481,15 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
     
     <div class="sleep-info" id="sleepInfo">
       Active for: <span id="activeTime">%ACTIVE_TIME%</span> | Next sleep in: <span id="sleepCountdown">%SLEEP_COUNTDOWN%</span>
+    </div>
+    
+    <div class="battery-info" id="batteryInfo">
+      Battery: <span id="batteryVoltage">%BATTERY_VOLTAGE%</span>V 
+      <span class="battery-status" id="batteryStatus">%BATTERY_STATUS%</span>
+      <div class="battery-level">
+        <div class="battery-fill" id="batteryFill" style="width: %BATTERY_PERCENTAGE%%"></div>
+      </div>
+      <div>Charge: <span id="batteryPercentage">%BATTERY_PERCENTAGE%</span>%</div>
     </div>
     
     <div class="next-online" id="nextOnline">
@@ -528,6 +586,27 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
             document.getElementById('activeTime').textContent = data.active_time || '0m 0s';
             document.getElementById('sleepCountdown').textContent = data.sleep_countdown || '0m 0s';
             document.getElementById('nextOnlineTime').textContent = data.next_online || 'Calculating...';
+            document.getElementById('batteryVoltage').textContent = data.battery_voltage ? data.battery_voltage.toFixed(2) : 'N/A';
+            document.getElementById('batteryPercentage').textContent = data.battery_percentage ? data.battery_percentage.toFixed(0) : 'N/A';
+            
+            // Update battery fill
+            const batteryFill = document.getElementById('batteryFill');
+            if (data.battery_percentage) {
+              batteryFill.style.width = data.battery_percentage.toFixed(0) + '%';
+            }
+            
+            // Update battery status indicator
+            const batteryStatus = document.getElementById('batteryStatus');
+            if (data.battery_voltage >= 3.7) {
+              batteryStatus.className = 'battery-status battery-good';
+              batteryStatus.textContent = 'Good';
+            } else if (data.battery_voltage >= 3.3) {
+              batteryStatus.className = 'battery-status battery-warning';
+              batteryStatus.textContent = 'Low';
+            } else {
+              batteryStatus.className = 'battery-status battery-critical';
+              batteryStatus.textContent = 'Critical';
+            }
             
             const waterLevel = document.getElementById('waterLevel');
             const currentLevel = document.getElementById('currentLevel');
@@ -874,6 +953,7 @@ const char PAGE_SLEEP_CONFIG[] PROGMEM = R"=====(
       <div class="info-item"><strong>Active Time:</strong> %ACTIVE_TIME% minutes</div>
       <div class="info-item"><strong>Sleep Time:</strong> %SLEEP_TIME% minutes</div>
       <div class="info-item"><strong>MQTT Interval:</strong> %MQTT_INTERVAL% seconds</div>
+      <div class="info-item"><strong>Battery:</strong> %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</div>
     </div>
     
     <form method="get" action="/sleep-config">
@@ -971,6 +1051,7 @@ const char PAGE_SLEEP_SAVED[] PROGMEM = R"=====(
     <div class="success-icon">✓</div>
     <h1>Sleep Configuration Saved</h1>
     <p>Sleep settings have been updated successfully.</p>
+    <p>Current Battery: %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</p>
     <a href="/sleep-config" class="back-link">← Back to Sleep Config</a>
     <a href="/" class="back-link">← Back to Dashboard</a>
   </div>
@@ -1084,6 +1165,7 @@ const char PAGE_WIFI_SETUP[] PROGMEM = R"=====(
     <div class="current-info">
       <div><strong>Current Device:</strong> %DEVICE_NAME%</div>
       <div class="current-mac">MAC: %MAC_ADDRESS%</div>
+      <div><strong>Battery:</strong> %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</div>
     </div>
     
     <!-- CHANGED: method="get" instead of "post" -->
@@ -1216,6 +1298,7 @@ const char PAGE_WIFI_SAVED[] PROGMEM = R"=====(
       <p>New settings will take effect after restart.</p>
       <p>Access point: %NEW_DEVICE_NAME%</p>
       <p>SSID: %NEW_SSID%</p>
+      <p>Battery: %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</p>
     </div>
     
     <div class="countdown" id="countdown">Rebooting in 5 seconds...</div>
@@ -1317,7 +1400,7 @@ const char PAGE_BENCHMARK_FORM[] PROGMEM = R"=====(
             margin-top: 20px;
             color: #3498db;
             text-decoration: none;
-        }
+    }
         .back-link:hover {
             text-decoration: underline;
         }
@@ -1345,6 +1428,240 @@ const char PAGE_BENCHMARK_FORM[] PROGMEM = R"=====(
 )=====";
 
 // ===== UTILITY FUNCTIONS =====
+
+// --- Preferences Functions ---
+void saveConfig() {
+  preferences.putFloat("tankWidth", tankWidth);
+  preferences.putFloat("tankHeight", tankHeight);
+  preferences.putFloat("volumeFactor", volumeFactor);
+  preferences.putInt("calibration_mm", calibration_mm);
+  Serial.println("Configuration saved");
+}
+
+void saveWiFiConfig(const char *ssid, const char *password, const char *mac = nullptr, const char *newDeviceName = nullptr) {
+  Serial.println("=== Saving WiFi Configuration ===");
+  Serial.printf("SSID: %s\n", ssid);
+  Serial.printf("Password: %s\n", password ? "******" : "(empty)");
+
+  if (newDeviceName) {
+    Serial.printf("New Device Name: %s\n", newDeviceName);
+  }
+
+  if (mac && strlen(mac) > 0) {
+    Serial.printf("Peer MAC: %s\n", mac);
+  }
+
+  // Save to preferences
+  preferences.putString("wifi_ssid", ssid);
+  preferences.putString("wifi_pass", password);
+
+  if (mac && strlen(mac) == 17) {
+    preferences.putString("peer_mac", mac);
+  }
+
+  if (newDeviceName) {
+    preferences.putString("device_name", newDeviceName);
+    strlcpy(deviceName, newDeviceName, sizeof(deviceName));
+    updateMQTTTopic();
+  }
+
+  // Force save
+  preferences.end();
+  delay(10);
+  preferences.begin("aqualevel", false);
+
+  Serial.println("WiFi settings saved to preferences");
+  Serial.println("================================");
+}
+
+void saveSleepConfig() {
+  preferences.putBool(SLEEP_ENABLED_KEY, deepSleepEnabled);
+  preferences.putULong(ACTIVE_WINDOW_KEY, activeWindow);
+  preferences.putULong(SLEEP_DURATION_KEY, sleepDuration);
+  preferences.putULong(MQTT_INTERVAL_KEY, mqttPublishInterval);
+  Serial.println("Sleep configuration saved");
+}
+
+void loadSleepConfig() {
+  deepSleepEnabled = preferences.getBool(SLEEP_ENABLED_KEY, true);
+  activeWindow = preferences.getULong(ACTIVE_WINDOW_KEY, DEFAULT_ACTIVE_WINDOW);
+  sleepDuration = preferences.getULong(SLEEP_DURATION_KEY, DEFAULT_SLEEP_DURATION);
+  mqttPublishInterval = preferences.getULong(MQTT_INTERVAL_KEY, DEFAULT_MQTT_INTERVAL);
+
+  // Validate loaded values
+  if (activeWindow < 60000 || activeWindow > 3600000) {
+    activeWindow = DEFAULT_ACTIVE_WINDOW;
+  }
+  if (sleepDuration < 60000000 || sleepDuration > 7200000000) {
+    sleepDuration = DEFAULT_SLEEP_DURATION;
+  }
+  if (mqttPublishInterval < 10000 || mqttPublishInterval > 300000) {
+    mqttPublishInterval = DEFAULT_MQTT_INTERVAL;
+  }
+
+  Serial.printf("Sleep config - Enabled: %s, Active: %lu ms, Sleep: %lu us, MQTT: %lu ms\n",
+                deepSleepEnabled ? "Yes" : "No", activeWindow, sleepDuration, mqttPublishInterval);
+}
+
+void initializePreferences() {
+  preferences.begin("aqualevel", false);
+
+  // Check if preferences need initialization
+  if (!preferences.isKey("device_name")) {
+    Serial.println("Preferences not initialized, setting defaults...");
+
+    // Set default tank configuration
+    preferences.putFloat("tankWidth", TANK_PRESETS[0][0]);
+    preferences.putFloat("tankHeight", TANK_PRESETS[0][1]);
+    preferences.putFloat("volumeFactor", TANK_PRESETS[0][2]);
+    preferences.putInt("calibration_mm", 0);
+
+    // Clear WiFi credentials
+    preferences.putString("wifi_ssid", "");
+    preferences.putString("wifi_pass", "");
+
+    // Set default device name
+    preferences.putString("device_name", DEFAULT_DEVICE_NAME);
+
+    // Initialize sleep configuration with defaults
+    preferences.putBool(SLEEP_ENABLED_KEY, true);
+    preferences.putULong(ACTIVE_WINDOW_KEY, DEFAULT_ACTIVE_WINDOW);
+    preferences.putULong(SLEEP_DURATION_KEY, DEFAULT_SLEEP_DURATION);
+    preferences.putULong(MQTT_INTERVAL_KEY, DEFAULT_MQTT_INTERVAL);
+
+    Serial.println("Preferences initialized with default values");
+  } else {
+    Serial.println("Preferences already initialized");
+  }
+}
+
+void loadConfig() {
+  // Load tank configuration
+  tankWidth = preferences.getFloat("tankWidth", TANK_PRESETS[0][0]);
+  tankHeight = preferences.getFloat("tankHeight", TANK_PRESETS[0][1]);
+  volumeFactor = preferences.getFloat("volumeFactor", TANK_PRESETS[0][2]);
+  calibration_mm = preferences.getInt("calibration_mm", 0);
+
+  // Load device name
+  String loadedName = preferences.getString("device_name", DEFAULT_DEVICE_NAME);
+  strlcpy(deviceName, loadedName.c_str(), sizeof(deviceName));
+
+  updateMQTTTopic();
+
+  // Load sleep configuration
+  loadSleepConfig();
+
+  // Validate loaded values
+  if (isnan(tankWidth) || tankWidth <= 10 || tankWidth > 300) {
+    tankWidth = TANK_PRESETS[0][0];
+  }
+  if (isnan(tankHeight) || tankHeight <= 10 || tankHeight > 300) {
+    tankHeight = TANK_PRESETS[0][1];
+  }
+  if (isnan(volumeFactor) || volumeFactor <= 0 || volumeFactor > 50) {
+    volumeFactor = TANK_PRESETS[0][2];
+  }
+  if (calibration_mm < -1000 || calibration_mm > 1000) {
+    calibration_mm = 0;
+  }
+
+  Serial.printf("Final config - Device: %s, Width: %.1f, Height: %.1f\n",
+                deviceName, tankWidth, tankHeight);
+}
+
+// ===== BATTERY FUNCTIONS (ADC with 47K/10K voltage divider) =====
+void initBatteryADC() {
+  pinMode(BATTERY_PIN, INPUT);
+  analogReadResolution(12);        // Set ADC resolution to 12 bits (0-4095)
+  analogSetAttenuation(ADC_11db);  // Set attenuation for 0-3.3V range
+
+  Serial.println("Battery ADC initialized (47K/10K voltage divider)");
+  Serial.printf("ADC Reference: %.2fV, Divider Ratio: %.1f\n", ADC_REFERENCE_VOLTAGE, VOLTAGE_DIVIDER_RATIO);
+  Serial.printf("Calibration Factor: %.2f\n", BATTERY_CALIBRATION_FACTOR);
+}
+
+float readBatteryVoltage() {
+  // Take multiple readings for stability
+  int samples = 10;
+  long sum = 0;
+
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(BATTERY_PIN);
+    delay(2);
+  }
+
+  float averageADC = (float)sum / samples;
+
+  // Calculate voltage with voltage divider
+  // Formula: Vbatt = (ADC_reading * Vref / ADC_max) * ((R1 + R2) / R2)
+  float measuredVoltage = (averageADC * ADC_REFERENCE_VOLTAGE / ADC_RESOLUTION) * VOLTAGE_DIVIDER_RATIO;
+
+  // Apply calibration factor
+  measuredVoltage *= BATTERY_CALIBRATION_FACTOR;
+
+  return measuredVoltage;
+}
+
+void checkBattery() {
+  // Read battery voltage from ADC
+  batteryVoltage = readBatteryVoltage();
+
+  //debug mode set vbat = 4
+  //batteryVoltage = 4.0;
+
+  // Calculate battery percentage (simple linear approximation for Li-ion)
+  if (batteryVoltage >= BATTERY_FULL_THRESHOLD) {
+    batteryPercentage = 100.0f;
+  } else if (batteryVoltage <= BATTERY_EMPTY_THRESHOLD) {
+    batteryPercentage = 0.0f;
+  } else {
+    // Linear interpolation between empty and full thresholds
+    batteryPercentage = ((batteryVoltage - BATTERY_EMPTY_THRESHOLD) / (BATTERY_FULL_THRESHOLD - BATTERY_EMPTY_THRESHOLD)) * 100.0f;
+    batteryPercentage = constrain(batteryPercentage, 0.0f, 100.0f);
+  }
+
+  // Check if battery is critically low
+  if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
+    lowBatteryMode = true;
+    Serial.printf("CRITICAL: Battery voltage %.2fV is below %.2fV threshold\n",
+                  batteryVoltage, BATTERY_CRITICAL_THRESHOLD);
+
+    // If battery is critically low, go to extended deep sleep
+    if (deepSleepEnabled) {
+      Serial.println("Battery critically low. Entering extended deep sleep...");
+
+      // Disable WiFi and MQTT to save power
+      WiFi.disconnect();
+      mqttClient.disconnect();
+
+      // Save current config
+      saveConfig();
+
+      // Enter deep sleep for 1 hour (or longer) to conserve battery
+      esp_deep_sleep(3600000000);  // 1 hour in microseconds
+    }
+  } else if (batteryVoltage < BATTERY_WARNING_THRESHOLD) {
+    lowBatteryMode = true;
+    Serial.printf("WARNING: Battery voltage %.2fV is low\n", batteryVoltage);
+  } else {
+    lowBatteryMode = false;
+  }
+
+  static unsigned long lastBatteryLog = 0;
+  if (millis() - lastBatteryLog > 60000) {  // Log every minute
+    lastBatteryLog = millis();
+    Serial.printf("Battery: %.2fV (%.0f%%)\n", batteryVoltage, batteryPercentage);
+  }
+}
+
+String getBatteryStatusString() {
+  if (!hasBatteryMonitoring) return "No ADC";
+
+  if (batteryVoltage >= 3.7f) return "Good";
+  if (batteryVoltage >= 3.3f) return "Low";
+  return "Critical";
+}
+
 String getNextOnlineTime() {
   if (!deepSleepEnabled) {
     return "Always online (sleep disabled)";
@@ -1399,10 +1716,13 @@ String getNextOnlineTimeForMQTT() {
     time_t nextWakeEpoch = now + secondsUntilNextWake;
 
     struct tm *ti = localtime(&nextWakeEpoch);
-    char timestamp[25];
-    snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
-             ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
-             ti->tm_hour, ti->tm_min, ti->tm_sec);
+    char timestamp[30];
+    snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+             ti->tm_mday,
+             ti->tm_mon + 1,
+             ti->tm_year + 1900,
+             ti->tm_hour,
+             ti->tm_min);
 
     return String(timestamp);
   } else {
@@ -1414,10 +1734,13 @@ String getNextOnlineTimeForMQTT() {
     time_t nextActiveEpoch = now + secondsUntilNextActive;
 
     struct tm *ti = localtime(&nextActiveEpoch);
-    char timestamp[25];
-    snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
-             ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
-             ti->tm_hour, ti->tm_min, ti->tm_sec);
+    char timestamp[30];
+    snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+             ti->tm_mday,
+             ti->tm_mon + 1,
+             ti->tm_year + 1900,
+             ti->tm_hour,
+             ti->tm_min);
 
     return String(timestamp);
   }
@@ -1548,9 +1871,13 @@ void processSerialCommand(String command) {
     deepSleepEnabled = true;
     preferences.putBool(SLEEP_ENABLED_KEY, true);
     Serial.println("Deep sleep enabled");
+  } else if (command == "battery") {
+    checkBattery();
+    Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+                  batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
   } else if (command.length() > 0) {
     Serial.printf("Unknown command: '%s'\n", command.c_str());
-    Serial.println("Available commands: mac, read, benchmark, reset, eeprom_reset, preferences_dump, sleep, sleep_disable, sleep_enable");
+    Serial.println("Available commands: mac, read, benchmark, reset, eeprom_reset, preferences_dump, sleep, sleep_disable, sleep_enable, battery");
   }
 }
 
@@ -1580,145 +1907,6 @@ void handleSerialInput() {
   }
 }
 
-// --- Preferences Functions ---
-void saveConfig() {
-  preferences.putFloat("tankWidth", tankWidth);
-  preferences.putFloat("tankHeight", tankHeight);
-  preferences.putFloat("volumeFactor", volumeFactor);
-  preferences.putInt("calibration_mm", calibration_mm);
-  Serial.println("Configuration saved");
-}
-
-void saveWiFiConfig(const char *ssid, const char *password, const char *mac = nullptr, const char *newDeviceName = nullptr) {
-  Serial.println("=== Saving WiFi Configuration ===");
-  Serial.printf("SSID: %s\n", ssid);
-  Serial.printf("Password: %s\n", password ? "******" : "(empty)");
-  
-  if (newDeviceName) {
-    Serial.printf("New Device Name: %s\n", newDeviceName);
-  }
-  
-  if (mac && strlen(mac) > 0) {
-    Serial.printf("Peer MAC: %s\n", mac);
-  }
-  
-  // Save to preferences
-  preferences.putString("wifi_ssid", ssid);
-  preferences.putString("wifi_pass", password);
-  
-  if (mac && strlen(mac) == 17) {
-    preferences.putString("peer_mac", mac);
-  }
-  
-  if (newDeviceName) {
-    preferences.putString("device_name", newDeviceName);
-    strlcpy(deviceName, newDeviceName, sizeof(deviceName));
-    updateMQTTTopic();
-  }
-  
-  // Force save
-  preferences.end();
-  delay(10);
-  preferences.begin("aqualevel", false);
-  
-  Serial.println("WiFi settings saved to preferences");
-  Serial.println("================================");
-}
-
-void saveSleepConfig() {
-  preferences.putBool(SLEEP_ENABLED_KEY, deepSleepEnabled);
-  preferences.putULong(ACTIVE_WINDOW_KEY, activeWindow);
-  preferences.putULong(SLEEP_DURATION_KEY, sleepDuration);
-  preferences.putULong(MQTT_INTERVAL_KEY, mqttPublishInterval);
-  Serial.println("Sleep configuration saved");
-}
-
-void loadSleepConfig() {
-  deepSleepEnabled = preferences.getBool(SLEEP_ENABLED_KEY, true);
-  activeWindow = preferences.getULong(ACTIVE_WINDOW_KEY, DEFAULT_ACTIVE_WINDOW);
-  sleepDuration = preferences.getULong(SLEEP_DURATION_KEY, DEFAULT_SLEEP_DURATION);
-  mqttPublishInterval = preferences.getULong(MQTT_INTERVAL_KEY, DEFAULT_MQTT_INTERVAL);
-
-  // Validate loaded values
-  if (activeWindow < 60000 || activeWindow > 3600000) {
-    activeWindow = DEFAULT_ACTIVE_WINDOW;
-  }
-  if (sleepDuration < 60000000 || sleepDuration > 7200000000) {
-    sleepDuration = DEFAULT_SLEEP_DURATION;
-  }
-  if (mqttPublishInterval < 10000 || mqttPublishInterval > 300000) {
-    mqttPublishInterval = DEFAULT_MQTT_INTERVAL;
-  }
-
-  Serial.printf("Sleep config - Enabled: %s, Active: %lu ms, Sleep: %lu us, MQTT: %lu ms\n",
-                deepSleepEnabled ? "Yes" : "No", activeWindow, sleepDuration, mqttPublishInterval);
-}
-
-void initializePreferences() {
-  preferences.begin("aqualevel", false);
-
-  // Check if preferences need initialization
-  if (!preferences.isKey("device_name")) {
-    Serial.println("Preferences not initialized, setting defaults...");
-
-    // Set default tank configuration
-    preferences.putFloat("tankWidth", TANK_PRESETS[0][0]);
-    preferences.putFloat("tankHeight", TANK_PRESETS[0][1]);
-    preferences.putFloat("volumeFactor", TANK_PRESETS[0][2]);
-    preferences.putInt("calibration_mm", 0);
-
-    // Clear WiFi credentials
-    preferences.putString("wifi_ssid", "");
-    preferences.putString("wifi_pass", "");
-
-    // Set default device name
-    preferences.putString("device_name", DEFAULT_DEVICE_NAME);
-
-    // Initialize sleep configuration with defaults
-    preferences.putBool(SLEEP_ENABLED_KEY, true);
-    preferences.putULong(ACTIVE_WINDOW_KEY, DEFAULT_ACTIVE_WINDOW);
-    preferences.putULong(SLEEP_DURATION_KEY, DEFAULT_SLEEP_DURATION);
-    preferences.putULong(MQTT_INTERVAL_KEY, DEFAULT_MQTT_INTERVAL);
-
-    Serial.println("Preferences initialized with default values");
-  } else {
-    Serial.println("Preferences already initialized");
-  }
-}
-
-void loadConfig() {
-  // Load tank configuration
-  tankWidth = preferences.getFloat("tankWidth", TANK_PRESETS[0][0]);
-  tankHeight = preferences.getFloat("tankHeight", TANK_PRESETS[0][1]);
-  volumeFactor = preferences.getFloat("volumeFactor", TANK_PRESETS[0][2]);
-  calibration_mm = preferences.getInt("calibration_mm", 0);
-
-  // Load device name
-  String loadedName = preferences.getString("device_name", DEFAULT_DEVICE_NAME);
-  strlcpy(deviceName, loadedName.c_str(), sizeof(deviceName));
-
-  updateMQTTTopic();
-
-  // Load sleep configuration
-  loadSleepConfig();
-
-  // Validate loaded values
-  if (isnan(tankWidth) || tankWidth <= 10 || tankWidth > 300) {
-    tankWidth = TANK_PRESETS[0][0];
-  }
-  if (isnan(tankHeight) || tankHeight <= 10 || tankHeight > 300) {
-    tankHeight = TANK_PRESETS[0][1];
-  }
-  if (isnan(volumeFactor) || volumeFactor <= 0 || volumeFactor > 50) {
-    volumeFactor = TANK_PRESETS[0][2];
-  }
-  if (calibration_mm < -1000 || calibration_mm > 1000) {
-    calibration_mm = 0;
-  }
-
-  Serial.printf("Final config - Device: %s, Width: %.1f, Height: %.1f\n",
-                deviceName, tankWidth, tankHeight);
-}
 
 bool readDistance(uint16_t &out_mm, float &out_cm) {
   return sensorManager.getStableReading(out_mm, out_cm);
@@ -1836,6 +2024,17 @@ void enterDeepSleep() {
     return;
   }
 
+  // Check battery before entering deep sleep
+  checkBattery();
+
+  if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
+    Serial.println("Battery critically low. Entering extended deep sleep (1 hour)...");
+
+    // Extended sleep for low battery
+    esp_deep_sleep(3600000000);  // 1 hour
+    return;
+  }
+
   Serial.println("Preparing for deep sleep...");
   saveConfig();
 
@@ -1845,6 +2044,7 @@ void enterDeepSleep() {
 
   Serial.println("Entering deep sleep...");
   Serial.printf("Active window was: %lu ms\n", millis() - activeWindowStart);
+  Serial.printf("Battery: %.2fV (%.0f%%)\n", batteryVoltage, batteryPercentage);
 
   // ESP32 deep sleep (in microseconds)
   esp_deep_sleep(sleepDuration);
@@ -1894,6 +2094,10 @@ String getRootHTML() {
   unsigned long sleepSeconds = (sleepTime % 60000) / 1000;
   String sleepCountdownStr = String(sleepMinutes) + "m " + String(sleepSeconds) + "s";
 
+  // Update battery info
+  checkBattery();
+  String batteryStatus = getBatteryStatusString();
+
   // Replace placeholders
   html.replace("%WATER_COLOR%", waterColor);
   html.replace("%PERCENT%", String(percent, 1));
@@ -1909,6 +2113,9 @@ String getRootHTML() {
   html.replace("%ACTIVE_TIME%", activeTimeStr);
   html.replace("%SLEEP_COUNTDOWN%", sleepCountdownStr);
   html.replace("%NEXT_ONLINE_TIME%", getNextOnlineTime());
+  html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+  html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+  html.replace("%BATTERY_STATUS%", batteryStatus);
 
   return html;
 }
@@ -1919,6 +2126,7 @@ void handleRootRequest(AsyncWebServerRequest *request) {
 
 void handleDataRequest(AsyncWebServerRequest *request) {
   updateMeasurements();
+  checkBattery();
 
   bool hasRecent = sensorManager.hasRecentReading();
   int validReadings = sensorManager.getValidReadingsCount();
@@ -1940,6 +2148,8 @@ void handleDataRequest(AsyncWebServerRequest *request) {
   json += "\"valid_readings\":" + String(validReadings) + ",";
   json += "\"active_time\":\"" + String(activeMinutes) + "m " + String(activeSeconds) + "s\",";
   json += "\"sleep_countdown\":\"" + String(sleepMinutes) + "m " + String(sleepSeconds) + "s\",";
+  json += "\"battery_voltage\":" + String(batteryVoltage, 2) + ",";
+  json += "\"battery_percentage\":" + String(batteryPercentage, 0) + ",";
   json += "\"next_online\":\"" + getNextOnlineTime() + "\"";
   json += "}";
 
@@ -2010,10 +2220,17 @@ void handleSleepConfigRequest(AsyncWebServerRequest *request) {
 
     saveSleepConfig();
 
+    // Update battery info before showing saved page
+    checkBattery();
     String html = FPSTR(PAGE_SLEEP_SAVED);
+    html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+    html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
     request->send(200, "text/html", html);
     return;
   }
+
+  // Update battery info before showing form
+  checkBattery();
 
   // Show config form
   String html = FPSTR(PAGE_SLEEP_CONFIG);
@@ -2025,6 +2242,8 @@ void handleSleepConfigRequest(AsyncWebServerRequest *request) {
   html.replace("%SLEEP_DURATION%", String(sleepDuration / 60000000));
   html.replace("%MQTT_INTERVAL_VAL%", String(mqttPublishInterval / 1000));
   html.replace("%SLEEP_CHECKED%", deepSleepEnabled ? "checked" : "");
+  html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+  html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
 
   request->send(200, "text/html", html);
 }
@@ -2033,58 +2252,68 @@ void handleWiFiSetupRequest(AsyncWebServerRequest *request) {
   // Check if this is a save request (has "save" parameter)
   if (request->hasParam("save")) {
     Serial.println("WiFi setup: Save requested");
-    
+
     // Get form parameters
     String newSSID = request->hasParam("ssid") ? request->getParam("ssid")->value() : "";
     String newPass = request->hasParam("password") ? request->getParam("password")->value() : "";
     String newMAC = request->hasParam("mac") ? request->getParam("mac")->value() : "";
     String newDeviceName = request->hasParam("device_name") ? request->getParam("device_name")->value() : "";
-    
+
     // Validate device name
     if (newDeviceName.length() == 0) {
       newDeviceName = DEFAULT_DEVICE_NAME;
     }
-    
+
     Serial.printf("New settings - SSID: %s, Device: %s\n", newSSID.c_str(), newDeviceName.c_str());
-    
+
     // Save configuration
     saveWiFiConfig(newSSID.c_str(), newPass.c_str(), newMAC.c_str(), newDeviceName.c_str());
-    
+
+    // Update battery info
+    checkBattery();
+
     // Build success page with parameters
     String html = FPSTR(PAGE_WIFI_SAVED);
     html.replace("%NEW_DEVICE_NAME%", newDeviceName);
     html.replace("%NEW_SSID%", newSSID);
-    
+    html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+    html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+
     request->send(200, "text/html", html);
-    
+
     // Schedule reboot after 5 seconds using a timer
     Serial.println("Countdown page sent. Rebooting in 5 seconds...");
-    
+
     // Create a one-shot timer for reboot
     static Ticker rebootTimer;
     rebootTimer.once(5, []() {
       Serial.println("5 seconds elapsed. Rebooting now...");
       ESP.restart();
     });
-    
+
     return;  // Return immediately, reboot will happen via timer
   }
-  
+
+  // Update battery info
+  checkBattery();
+
   // Show WiFi setup form (GET without save parameter)
   Serial.println("WiFi setup: Showing form");
-  
+
   String ssid = preferences.getString("wifi_ssid", "");
   String password = preferences.getString("wifi_pass", "");
   String storedMAC = preferences.getString("peer_mac", "");
   String currentDeviceName = preferences.getString("device_name", DEFAULT_DEVICE_NAME);
-  
+
   String html = FPSTR(PAGE_WIFI_SETUP);
   html.replace("%DEVICE_NAME%", currentDeviceName);
   html.replace("%MAC_ADDRESS%", WiFi.macAddress());
   html.replace("%SSID%", ssid);
   html.replace("%PASSWORD%", password);
   html.replace("%MAC%", storedMAC);
-  
+  html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+  html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+
   request->send(200, "text/html", html);
 }
 
@@ -2136,14 +2365,95 @@ String getCustomTimestamp() {
   return String(timestamp);
 }
 
+
 void publishMQTTStatus() {
   if (!mqttClient.connected()) {
     Serial.println("MQTT not connected, skip publish");
     return;
   }
 
-  char payload[256];
+  // Update battery before publishing
+  checkBattery();
+
+  char payload[350];  // Increased buffer size for additional field
   String NTPDateTime = getCustomTimestamp();
+
+  // Calculate next sleep time (when active window ends)
+  unsigned long currentTime = millis();
+  unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
+  unsigned long nextSleepTime = 0;
+
+  if (deepSleepEnabled) {
+    if (timeSinceActiveStart < activeWindow) {
+      // Still in active window, calculate when sleep will start
+      nextSleepTime = activeWindowStart + activeWindow;
+    } else {
+      // Already past active window (shouldn't happen, but just in case)
+      nextSleepTime = currentTime;
+    }
+  } else {
+    // Sleep disabled, next sleep is "never"
+    nextSleepTime = 0;
+  }
+
+  // Calculate timestamps for next_sleep and next_online
+  String nextSleepTimestamp = "never";
+  String nextOnlineTimestamp = "always_online";
+
+  if (deepSleepEnabled) {
+    // Calculate next_sleep timestamp
+    if (nextSleepTime > 0) {
+      time_t now = timeClient.getEpochTime();
+      unsigned long secondsUntilSleep = (nextSleepTime - currentTime) / 1000;
+      time_t sleepEpoch = now + secondsUntilSleep;
+
+      struct tm *ti = localtime(&sleepEpoch);
+      char timestamp[30];
+      snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+               ti->tm_mday,
+               ti->tm_mon + 1,
+               ti->tm_year + 1900,
+               ti->tm_hour,
+               ti->tm_min);
+      nextSleepTimestamp = String(timestamp);
+    }
+
+    // Calculate next_online timestamp
+    if (timeSinceActiveStart < activeWindow) {
+      unsigned long nextWakeTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
+
+      time_t now = timeClient.getEpochTime();
+      unsigned long secondsUntilNextWake = (nextWakeTime - currentTime) / 1000;
+      time_t nextWakeEpoch = now + secondsUntilNextWake;
+
+      struct tm *ti = localtime(&nextWakeEpoch);
+      char timestamp[30];
+      snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+               ti->tm_mday,
+               ti->tm_mon + 1,
+               ti->tm_year + 1900,
+               ti->tm_hour,
+               ti->tm_min);
+      nextOnlineTimestamp = String(timestamp);
+    } else {
+      // Already sleeping, next online is after sleep duration
+      unsigned long sleepEndTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
+
+      time_t now = timeClient.getEpochTime();
+      unsigned long secondsUntilNextActive = (sleepEndTime - currentTime) / 1000;
+      time_t nextActiveEpoch = now + secondsUntilNextActive;
+
+      struct tm *ti = localtime(&nextActiveEpoch);
+      char timestamp[30];
+      snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
+               ti->tm_mday,
+               ti->tm_mon + 1,
+               ti->tm_year + 1900,
+               ti->tm_hour,
+               ti->tm_min);
+      nextOnlineTimestamp = String(timestamp);
+    }
+  }
 
   snprintf(payload, sizeof(payload),
            "{\"timestamp\":\"%s\","
@@ -2153,6 +2463,10 @@ void publishMQTTStatus() {
            "\"distance_cm\":%.1f,"
            "\"level_percent\":%.1f,"
            "\"volume_liters\":%.1f,"
+           "\"battery_voltage\":%.2f,"
+           "\"battery_percentage\":%.0f,"
+           "\"battery_status\":\"%s\","
+           "\"next_sleep\":\"%s\","
            "\"next_online\":\"%s\"}",
            NTPDateTime.c_str(),
            formatRuntime(millis()).c_str(),
@@ -2161,7 +2475,11 @@ void publishMQTTStatus() {
            cm,
            percent,
            volume,
-           getNextOnlineTimeForMQTT().c_str());
+           batteryVoltage,
+           batteryPercentage,
+           getBatteryStatusString().c_str(),
+           nextSleepTimestamp.c_str(),
+           nextOnlineTimestamp.c_str());
 
   if (mqttClient.publish(PubTopic, 0, true, payload)) {
     Serial.println("MQTT published: " + String(payload));
@@ -2169,6 +2487,7 @@ void publishMQTTStatus() {
     Serial.println("MQTT publish failed");
   }
 }
+
 
 //=============== MQTT functions ====================
 void printSeparationLine() {
@@ -2350,11 +2669,21 @@ void setup() {
   delay(100);
 
   Serial.println();
-  Serial.println("              AquaLevel Pro (ESP32)            ");
-  //Serial.println("Available commands: mac, read, benchmark, reset");
+  Serial.println("    AquaLevel Pro (ESP32 Dev Board)            ");
   Serial.println("===============================================");
   Serial.println("    Designed by Asst.Prof Komkrit Chooruang    ");
   Serial.println("===============================================");
+
+  // Initialize battery ADC (47K/10K voltage divider)
+  initBatteryADC();
+
+  //Check battery status immediately
+  checkBattery();
+
+  if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
+    Serial.println("CRITICAL: Battery too low. Going to deep sleep immediately.");
+    esp_deep_sleep(3600000000);  // 1 hour sleep
+  }
 
   initializePreferences();
   loadConfig();
@@ -2475,6 +2804,8 @@ void setup() {
 
   Serial.printf("Setup complete - %lumin active / %lumin sleep cycle\n",
                 activeWindow / 60000, sleepDuration / 60000000);
+  Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+                batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
   blinkGreenLED(2);
 }
 
@@ -2486,6 +2817,13 @@ void loop() {
   handleSensorReading();
   checkActiveWindow();
 
+  // Check battery periodically
+  static unsigned long lastBatteryCheck = 0;
+  if (millis() - lastBatteryCheck >= 30000) {  // Check every 30 seconds
+    lastBatteryCheck = millis();
+    checkBattery();
+  }
+
   static unsigned long lastWifiCheck = 0;
   if (millis() - lastWifiCheck >= 60000) {
     lastWifiCheck = millis();
@@ -2493,6 +2831,8 @@ void loop() {
                   ESP.getFreeHeap(),
                   WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected",
                   mqttClient.connected() ? "Connected" : "Disconnected");
+    Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+                  batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnect");
       WiFi.disconnect();
