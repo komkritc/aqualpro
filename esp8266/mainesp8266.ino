@@ -28,32 +28,32 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600);  // UTC+7 (Bangkok time)
 #define DEFAULT_ACTIVE_WINDOW 900000       // 15 minutes active (900000 ms = 15 * 60 * 1000)
 #define DEFAULT_SLEEP_DURATION 1200000000  // 20 minutes deep sleep (1200000000 microseconds = 20 * 60 * 1000 * 1000)
 #define DEFAULT_MQTT_INTERVAL 60000        // 1 minute MQTT publish interval
-#define FORCE_WAKE_PIN D0          // GPIO16 for wakeup from deep sleep
+#define FORCE_WAKE_PIN D0                  // GPIO16 for wakeup from deep sleep
 
 // --- Battery Monitoring (ADC with 47K/10K voltage divider) ---
 #define BATTERY_PIN A0                    // A0 for ADC battery reading on ESP8266
 #define ADC_RESOLUTION 1023               // 10-bit ADC (0-1023) for ESP8266
-#define ADC_REFERENCE_VOLTAGE 1.0f        // ESP8266 ADC reference is 1.0V
+#define ADC_REFERENCE_VOLTAGE 3.2f        // ESP8266 ADC reference is 1.0V
 #define VOLTAGE_DIVIDER_RATIO 5.7f        // (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
-#define BATTERY_CALIBRATION_FACTOR 3.09f   // Calibration factor for accuracy
+#define BATTERY_CALIBRATION_FACTOR 1.0f   // Calibration factor for accuracy
 #define BATTERY_READ_INTERVAL 30000       // Check battery every 30 seconds
 
 bool hasBatteryMonitoring = true;
 float batteryVoltage = 0.0f;
 float batteryPercentage = 0.0f;
 bool lowBatteryMode = false;
-#define BATTERY_CRITICAL_THRESHOLD 3.0f   // 3.0V - Critical, go to deep sleep
-#define BATTERY_WARNING_THRESHOLD 3.3f    // 3.3V - Warning level
-#define BATTERY_FULL_THRESHOLD 4.2f       // 4.2V - Full (Li-ion battery)
-#define BATTERY_EMPTY_THRESHOLD 3.0f      // 3.0V - Empty
+#define BATTERY_CRITICAL_THRESHOLD 3.0f  // 3.0V - Critical, go to deep sleep
+#define BATTERY_WARNING_THRESHOLD 3.3f   // 3.3V - Warning level
+#define BATTERY_FULL_THRESHOLD 4.2f      // 4.2V - Full (Li-ion battery)
+#define BATTERY_EMPTY_THRESHOLD 3.0f     // 3.0V - Empty
 
 // EEPROM addresses for sleep configuration
-#define ADDR_SLEEP_ENABLED 120     // bool (1 byte)
-#define ADDR_ACTIVE_WINDOW 121     // unsigned long (4 bytes)
-#define ADDR_SLEEP_DURATION 125    // unsigned long (4 bytes) 
-#define ADDR_MQTT_INTERVAL 129     // unsigned long (4 bytes)
+#define ADDR_SLEEP_ENABLED 120   // bool (1 byte)
+#define ADDR_ACTIVE_WINDOW 121   // unsigned long (4 bytes)
+#define ADDR_SLEEP_DURATION 125  // unsigned long (4 bytes)
+#define ADDR_MQTT_INTERVAL 129   // unsigned long (4 bytes)
 
-bool deepSleepEnabled = true;      // Set to false to disable deep sleep for debugging
+bool deepSleepEnabled = true;  // Set to false to disable deep sleep for debugging
 unsigned long activeWindowStart = 0;
 bool isActiveWindow = true;
 unsigned long activeWindow = DEFAULT_ACTIVE_WINDOW;
@@ -1313,14 +1313,14 @@ String getNextOnlineTime() {
   if (!deepSleepEnabled) {
     return "Always online (sleep disabled)";
   }
-  
+
   unsigned long currentTime = millis();
   unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
-  
+
   if (timeSinceActiveStart < activeWindow) {
     // Still in active window
     unsigned long nextWakeTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
-    
+
     // Get current time
     time_t now;
     if (timeClient.isTimeSet()) {
@@ -1329,21 +1329,21 @@ String getNextOnlineTime() {
       // Fallback to rough estimate based on uptime
       now = 1700000000 + (currentTime / 1000);
     }
-    
+
     unsigned long secondsUntilNextWake = (nextWakeTime - currentTime) / 1000;
     time_t nextWakeEpoch = now + secondsUntilNextWake;
-    
+
     struct tm *ti = localtime(&nextWakeEpoch);
     char timeStr[20];
-    snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", 
+    snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d",
              ti->tm_hour, ti->tm_min, ti->tm_sec);
-    
+
     return String(timeStr);
   } else {
     // Should be sleeping now
     unsigned long sleepEndTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
     unsigned long nextActiveTime = sleepEndTime;
-    
+
     // Get current time
     time_t now;
     if (timeClient.isTimeSet()) {
@@ -1352,15 +1352,15 @@ String getNextOnlineTime() {
       // Fallback to rough estimate based on uptime
       now = 1700000000 + (currentTime / 1000);
     }
-    
+
     unsigned long secondsUntilNextActive = (nextActiveTime - currentTime) / 1000;
     time_t nextActiveEpoch = now + secondsUntilNextActive;
-    
+
     struct tm *ti = localtime(&nextActiveEpoch);
     char timeStr[20];
-    snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", 
+    snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d",
              ti->tm_hour, ti->tm_min, ti->tm_sec);
-    
+
     return String(timeStr);
   }
 }
@@ -1369,27 +1369,27 @@ String getNextOnlineTimeForMQTT() {
   if (!deepSleepEnabled) {
     return "always_online";
   }
-  
+
   // Calculate when the device will be online next
   unsigned long currentTime = millis();
   unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
-  
+
   if (timeSinceActiveStart < activeWindow) {
     // Still in active window
     unsigned long nextWakeTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
-    
+
     // Get current epoch time
     time_t now;
     if (timeClient.isTimeSet()) {
       now = timeClient.getEpochTime();
     } else {
       // Fallback to rough estimate based on uptime
-      now = 1700000000 + (currentTime / 1000); // Base timestamp + uptime
+      now = 1700000000 + (currentTime / 1000);  // Base timestamp + uptime
     }
-    
+
     unsigned long secondsUntilNextWake = (nextWakeTime - currentTime) / 1000;
     time_t nextWakeEpoch = now + secondsUntilNextWake;
-    
+
     struct tm *ti = localtime(&nextWakeEpoch);
     char timestamp[30];
     snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
@@ -1398,13 +1398,13 @@ String getNextOnlineTimeForMQTT() {
              ti->tm_year + 1900,
              ti->tm_hour,
              ti->tm_min);
-    
+
     return String(timestamp);
   } else {
     // Should be sleeping now, calculate next active time
     unsigned long sleepEndTime = activeWindowStart + activeWindow + (sleepDuration / 1000);
     unsigned long nextActiveTime = sleepEndTime;
-    
+
     // Get current epoch time
     time_t now;
     if (timeClient.isTimeSet()) {
@@ -1413,10 +1413,10 @@ String getNextOnlineTimeForMQTT() {
       // Fallback to rough estimate based on uptime
       now = 1700000000 + (currentTime / 1000);
     }
-    
+
     unsigned long secondsUntilNextActive = (nextActiveTime - currentTime) / 1000;
     time_t nextActiveEpoch = now + secondsUntilNextActive;
-    
+
     struct tm *ti = localtime(&nextActiveEpoch);
     char timestamp[30];
     snprintf(timestamp, sizeof(timestamp), "%02d-%02d-%04dT%02d:%02d",
@@ -1425,7 +1425,7 @@ String getNextOnlineTimeForMQTT() {
              ti->tm_year + 1900,
              ti->tm_hour,
              ti->tm_min);
-    
+
     return String(timestamp);
   }
 }
@@ -1583,96 +1583,6 @@ void runSerialBenchmark(int iterations = 30) {
   Serial.println("=========================");
 }
 
-
-void processSerialCommand(String command) {
-  command.trim();
-  command.toLowerCase();
-
-  if (command == "mac") {
-    Serial.printf("MAC Address: %s\n", WiFi.macAddress().c_str());
-  } else if (command == "read") {
-    uint16_t temp_mm;
-    float temp_cm;
-    if (readDistanceBurst(temp_mm, temp_cm, 2)) {
-      Serial.printf("Distance: %.1f cm\n", temp_cm);
-    } else {
-      Serial.println("Read failed");
-    }
-  } else if (command == "benchmark") {
-    runSerialBenchmark();
-  } else if (command == "reset") {
-    Serial.println("Resetting...");
-    delay(1000);
-    ESP.restart();
-  } else if (command == "eeprom_reset") {  // ADD THIS NEW COMMAND
-    Serial.println("Resetting EEPROM to defaults...");
-
-    // Clear the magic number to force re-initialization
-    uint32_t magicNumber = 0;
-    EEPROM.put(EEPROM_SIZE - 4, magicNumber);
-    EEPROM.commit();
-
-    Serial.println("EEPROM reset. Restarting...");
-    delay(1000);
-    ESP.restart();
-  } else if (command == "eeprom_dump") {  // ADD THIS FOR DEBUGGING
-    Serial.println("EEPROM Dump:");
-    for (int i = 0; i < EEPROM_SIZE; i++) {
-      if (i % 16 == 0) Serial.printf("\n%04X: ", i);
-      byte b = EEPROM.read(i);
-      Serial.printf("%02X ", b);
-    }
-    Serial.println();
-  } else if (command == "sleep") {  // ADD DEEP SLEEP COMMAND
-    Serial.println("Manual deep sleep command received");
-    //enterDeepSleep();
-  } else if (command == "sleep_disable") {  // DISABLE DEEP SLEEP
-    deepSleepEnabled = false;
-    Serial.println("Deep sleep disabled");
-  } else if (command == "sleep_enable") {  // ENABLE DEEP SLEEP
-    deepSleepEnabled = true;
-    Serial.println("Deep sleep enabled");
-  // } else if (command == "battery") {  // ADD BATTERY COMMAND
-  //   checkBattery();
-  //   Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
-  //                 batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
-  } else if (command.length() > 0) {
-    Serial.printf("Unknown command: '%s'\n", command.c_str());
-    Serial.println("Available commands: mac, read, benchmark, reset, eeprom_reset, eeprom_dump, sleep, sleep_disable, sleep_enable, battery");
-  }
-}
-
-void handleSerialInput() {
-  while (Serial.available()) {
-    char inChar = Serial.read();
-
-    // Handle newline characters (CR or LF)
-    if (inChar == '\n' || inChar == '\r') {
-      if (serialBufferIndex > 0) {
-        serialCommandBuffer[serialBufferIndex] = '\0';
-        String command = String(serialCommandBuffer);
-        processSerialCommand(command);
-        serialBufferIndex = 0;
-      }
-    }
-    // Handle backspace
-    else if (inChar == '\b' || inChar == 127) {
-      if (serialBufferIndex > 0) {
-        serialBufferIndex--;
-        Serial.print("\b \b");  // Echo backspace
-      }
-    }
-    // Regular characters
-    else if (inChar >= 32 && inChar <= 126) {  // Printable characters
-      if (serialBufferIndex < SERIAL_COMMAND_BUFFER_SIZE - 1) {
-        serialCommandBuffer[serialBufferIndex] = inChar;
-        serialBufferIndex++;
-        Serial.print(inChar);  // Echo character
-      }
-    }
-  }
-}
-
 // --- EEPROM Functions ---
 void saveConfig() {
   EEPROM.put(ADDR_WIDTH, tankWidth);
@@ -1725,7 +1635,7 @@ void saveSleepConfig() {
   EEPROM.put(ADDR_ACTIVE_WINDOW, activeWindow);
   EEPROM.put(ADDR_SLEEP_DURATION, sleepDuration);
   EEPROM.put(ADDR_MQTT_INTERVAL, mqttPublishInterval);
-  
+
   if (EEPROM.commit()) {
     Serial.println("Sleep configuration saved to EEPROM");
   } else {
@@ -1741,13 +1651,13 @@ void loadSleepConfig() {
   EEPROM.get(ADDR_MQTT_INTERVAL, mqttPublishInterval);
 
   // Validate loaded values
-  if (activeWindow < 60000 || activeWindow > 3600000) { // 1 min to 60 min
+  if (activeWindow < 60000 || activeWindow > 3600000) {  // 1 min to 60 min
     activeWindow = DEFAULT_ACTIVE_WINDOW;
   }
-  if (sleepDuration < 60000000 || sleepDuration > 7200000000) { // 1 min to 120 min
+  if (sleepDuration < 60000000 || sleepDuration > 7200000000) {  // 1 min to 120 min
     sleepDuration = DEFAULT_SLEEP_DURATION;
   }
-  if (mqttPublishInterval < 10000 || mqttPublishInterval > 300000) { // 10 sec to 5 min
+  if (mqttPublishInterval < 10000 || mqttPublishInterval > 300000) {  // 10 sec to 5 min
     mqttPublishInterval = DEFAULT_MQTT_INTERVAL;
   }
 
@@ -2134,45 +2044,45 @@ void enterDeepSleep() {
     Serial.println("Deep sleep disabled, continuing normal operation");
     return;
   }
-  
+
   // Check battery before entering deep sleep
   checkBattery();
-  
+
   if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
     Serial.println("Battery critically low. Entering extended deep sleep (1 hour)...");
-    
+
     // Extended sleep for low battery
     ESP.deepSleep(3600000000);  // 1 hour
     return;
   }
-  
+
   Serial.println("Preparing for deep sleep...");
-  
+
   // Save current state to EEPROM if needed
   saveConfig();
-  
+
   // Close connections gracefully
   server.stop();
   mqttClient.disconnect(true);
   WiFi.disconnect();
-  
+
   Serial.println("Entering deep sleep...");
   Serial.printf("Active window was: %lu ms\n", millis() - activeWindowStart);
   Serial.printf("Battery: %.2fV (%.0f%%)\n", batteryVoltage, batteryPercentage);
-  
+
   // Blink LED to indicate sleep
   //blinkBlueLED(3, 200);
-  
+
   // Configure wakeup source and enter deep sleep
   ESP.deepSleep(sleepDuration, WAKE_RF_DEFAULT);
-  
+
   // Small delay to ensure deep sleep command is processed
   delay(100);
 }
 
 void checkActiveWindow() {
   if (!deepSleepEnabled) return;
-  
+
   if (millis() - activeWindowStart >= activeWindow) {
     Serial.println("Active window expired, entering deep sleep");
     enterDeepSleep();
@@ -2193,7 +2103,7 @@ String formatRuntime(unsigned long ms) {
 void handleRoot() {
   updateMeasurements();
   checkBattery();  // Update battery info
-  
+
   String waterColor = (percent < 20) ? "#ff4444" : "#4285f4";
   float maxVolume = volumeFactor * tankHeight;
 
@@ -2216,22 +2126,22 @@ void handleRoot() {
   html.replace("%UPTIME%", formatRuntime(millis()));
   html.replace("%VALID_READINGS%", String(sensorManager.getValidReadingsCount()));
   html.replace("%UPDATE_INTERVAL%", String(UPDATE_INTERVAL));
-  
+
   // Add sleep info
   unsigned long activeTime = millis() - activeWindowStart;
   unsigned long activeMinutes = activeTime / 60000;
   unsigned long activeSeconds = (activeTime % 60000) / 1000;
   String activeTimeStr = String(activeMinutes) + "m " + String(activeSeconds) + "s";
-  
+
   unsigned long sleepTime = activeWindow - activeTime;
   unsigned long sleepMinutes = sleepTime / 60000;
   unsigned long sleepSeconds = (sleepTime % 60000) / 1000;
   String sleepCountdownStr = String(sleepMinutes) + "m " + String(sleepSeconds) + "s";
-  
+
   html.replace("%ACTIVE_TIME%", activeTimeStr);
   html.replace("%SLEEP_COUNTDOWN%", sleepCountdownStr);
   html.replace("%NEXT_ONLINE_TIME%", getNextOnlineTime());
-  
+
   // Add battery info
   html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
   html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
@@ -2247,12 +2157,12 @@ void handleData() {
   // Include sensor health information
   bool hasRecent = sensorManager.hasRecentReading();
   int validReadings = sensorManager.getValidReadingsCount();
-  
+
   // Calculate active window times
   unsigned long activeTime = millis() - activeWindowStart;
   unsigned long activeMinutes = activeTime / 60000;
   unsigned long activeSeconds = (activeTime % 60000) / 1000;
-  
+
   unsigned long sleepTime = activeWindow - activeTime;
   unsigned long sleepMinutes = sleepTime / 60000;
   unsigned long sleepSeconds = (sleepTime % 60000) / 1000;
@@ -2282,7 +2192,7 @@ void handleSensorStats() {
 void handleConfig() {
   // Update battery info first
   checkBattery();
-  
+
   // Handle form submission
   if (server.hasArg("save")) {
     if (server.hasArg("preset_mode") && server.arg("preset_mode") == "1") {
@@ -2315,7 +2225,7 @@ void handleConfig() {
 
   // Generate the configuration page
   String html = FPSTR(PAGE_CONFIG);
-  
+
   // Replace placeholders
   html.replace("%TANK_WIDTH%", String(tankWidth, 1));
   html.replace("%TANK_HEIGHT%", String(tankHeight, 1));
@@ -2331,31 +2241,31 @@ void handleConfig() {
 void handleSleepConfig() {
   // Update battery info first
   checkBattery();
-  
+
   if (server.hasArg("save")) {
     // Handle form submission
     deepSleepEnabled = server.hasArg("sleep_enabled");
-    
+
     if (server.hasArg("active_window")) {
-      activeWindow = server.arg("active_window").toInt() * 60000; // Convert minutes to milliseconds
+      activeWindow = server.arg("active_window").toInt() * 60000;  // Convert minutes to milliseconds
     }
-    
+
     if (server.hasArg("sleep_duration")) {
-      sleepDuration = server.arg("sleep_duration").toInt() * 60000000; // Convert minutes to microseconds
+      sleepDuration = server.arg("sleep_duration").toInt() * 60000000;  // Convert minutes to microseconds
     }
-    
+
     if (server.hasArg("mqtt_interval")) {
-      mqttPublishInterval = server.arg("mqtt_interval").toInt() * 1000; // Convert seconds to milliseconds
+      mqttPublishInterval = server.arg("mqtt_interval").toInt() * 1000;  // Convert seconds to milliseconds
     }
-    
+
     // Save configuration to EEPROM
     saveSleepConfig();
-    
+
     // Generate saved page with battery info
     String html = FPSTR(PAGE_SLEEP_SAVED);
     html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
     html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
-    
+
     // Send success response
     server.send(200, "text/html", html);
     return;
@@ -2363,7 +2273,7 @@ void handleSleepConfig() {
 
   // Generate the sleep configuration page
   String html = FPSTR(PAGE_SLEEP_CONFIG);
-  
+
   // Replace placeholders
   html.replace("%SLEEP_STATUS%", deepSleepEnabled ? "Sleep Enabled" : "Sleep Disabled");
   html.replace("%ACTIVE_TIME%", String(activeWindow / 60000));
@@ -2675,7 +2585,7 @@ void handleBenchmark() {
 void handleWiFiSetup() {
   // Update battery info first
   checkBattery();
-  
+
   if (server.hasArg("save")) {
     String newSSID = server.arg("ssid");
     String newPass = server.arg("password");
@@ -2717,7 +2627,7 @@ void handleWiFiSetup() {
 
     // Build the HTML response
     String html = FPSTR(PAGE_WIFI_SETUP);
-    
+
     // Replace placeholders
     html.replace("%DEVICE_NAME%", currentDeviceName);
     html.replace("%MAC_ADDRESS%", WiFi.macAddress());
@@ -2758,26 +2668,26 @@ String getCustomTimestamp() {
   if (!timeClient.isTimeSet()) {
     // Try to update time once
     timeClient.update();
-    
+
     // If still not set, return uptime-based timestamp
     if (!timeClient.isTimeSet()) {
       unsigned long uptime = millis();
       unsigned long hours = uptime / 3600000;
       unsigned long minutes = (uptime % 3600000) / 60000;
-      
+
       char timestamp[20];
       snprintf(timestamp, sizeof(timestamp),
                "UP%03lu:%02lu",
                hours, minutes);
-      
+
       return String(timestamp);
     }
   }
-  
+
   // Get NTP time
   time_t rawtime = timeClient.getEpochTime();
   struct tm *ti = localtime(&rawtime);
-  
+
   char timestamp[20];
   snprintf(timestamp, sizeof(timestamp),
            "%02d-%02d-%04dT%02d:%02d",
@@ -2786,7 +2696,7 @@ String getCustomTimestamp() {
            ti->tm_year + 1900,
            ti->tm_hour,
            ti->tm_min);
-  
+
   return String(timestamp);
 }
 
@@ -2807,7 +2717,7 @@ void publishMQTTStatus() {
   if (deepSleepEnabled) {
     unsigned long currentTime = millis();
     unsigned long timeSinceActiveStart = currentTime - activeWindowStart;
-    
+
     if (timeSinceActiveStart < activeWindow) {
       // Still in active window
       unsigned long sleepStartTime = activeWindowStart + activeWindow;
@@ -2819,7 +2729,7 @@ void publishMQTTStatus() {
       }
       unsigned long secondsUntilSleep = (sleepStartTime - currentTime) / 1000;
       time_t sleepStartEpoch = now + secondsUntilSleep;
-      
+
       struct tm *ti = localtime(&sleepStartEpoch);
       char sleepTimeStr[30];
       snprintf(sleepTimeStr, sizeof(sleepTimeStr), "%02d-%02d-%04dT%02d:%02d",
@@ -3072,11 +2982,11 @@ bool connectToWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWiFi connected: " + WiFi.localIP().toString());
-    
+
     // Initialize and sync NTP time
     timeClient.begin();
     timeClient.update();
-    
+
     // Wait for time to sync (with timeout)
     Serial.println("Syncing NTP time...");
     unsigned long syncStart = millis();
@@ -3085,14 +2995,14 @@ bool connectToWiFi() {
       delay(1000);
       Serial.print(".");
     }
-    
+
     if (timeClient.isTimeSet()) {
       Serial.println("\nNTP time synced!");
       Serial.printf("Current time: %s\n", timeClient.getFormattedTime().c_str());
     } else {
       Serial.println("\nNTP sync failed!");
     }
-    
+
     connectToMqtt();
     wifiConnected = true;
     blinkGreenLED(1);
@@ -3113,7 +3023,7 @@ void initBatteryADC() {
   // ESP8266 uses A0 for ADC
   // Note: ESP8266 ADC has 10-bit resolution (0-1023) and 1.0V reference
   Serial.println("Battery ADC initialized (47K/10K voltage divider)");
-  Serial.printf("ADC Resolution: %d bits\n", ADC_RESOLUTION + 1); // 10-bit = 0-1023
+  Serial.printf("ADC Resolution: %d bits\n", ADC_RESOLUTION + 1);  // 10-bit = 0-1023
   Serial.printf("ADC Reference: %.2fV\n", ADC_REFERENCE_VOLTAGE);
   Serial.printf("Voltage Divider Ratio: %.1f\n", VOLTAGE_DIVIDER_RATIO);
   Serial.printf("Calibration Factor: %.2f\n", BATTERY_CALIBRATION_FACTOR);
@@ -3131,12 +3041,21 @@ float readBatteryVoltage() {
 
   float averageADC = (float)sum / samples;
 
-  // Calculate voltage with voltage divider
-  // ESP8266 ADC: 0-1023 represents 0-1.0V (ADC reference is 1.0V)
-  // Formula: Vbatt = (ADC_reading * Vref / ADC_max) * ((R1 + R2) / R2)
-  float measuredVoltage = (averageADC * ADC_REFERENCE_VOLTAGE / ADC_RESOLUTION) * VOLTAGE_DIVIDER_RATIO;
+  // ESP8266 ADC: 0-1023 represents 0-1.0V
+  // Voltage divider ratio: (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
+  // Formula: Vbatt = (ADC_reading * 1.0V / 1023) * 5.7
 
-  // Apply calibration factor
+  // First: Convert ADC reading to voltage at divider output
+  float dividerOutputVoltage = averageADC * 1.0 / 1023.0;
+
+  // Second: Calculate battery voltage (before divider)
+  float measuredVoltage = dividerOutputVoltage * VOLTAGE_DIVIDER_RATIO;
+
+  // Debug output
+  Serial.printf("ADC: %.1f, Divider Out: %.3fV, Battery: %.3fV\n",
+                averageADC, dividerOutputVoltage, measuredVoltage);
+
+  // Apply calibration factor if needed
   measuredVoltage *= BATTERY_CALIBRATION_FACTOR;
 
   return measuredVoltage;
@@ -3147,6 +3066,7 @@ void checkBattery() {
 
   // Read battery voltage from ADC
   batteryVoltage = readBatteryVoltage();
+  Serial.printf("DEBUG: Battery voltage = %.3fV\n", batteryVoltage);
 
   // Calculate battery percentage (simple linear approximation for Li-ion)
   if (batteryVoltage >= BATTERY_FULL_THRESHOLD) {
@@ -3201,6 +3121,108 @@ String getBatteryStatusString() {
   return "Critical";
 }
 
+void processSerialCommand(String command) {
+  command.trim();
+  command.toLowerCase();
+
+  if (command == "mac") {
+    Serial.printf("MAC Address: %s\n", WiFi.macAddress().c_str());
+  } else if (command == "read") {
+    uint16_t temp_mm;
+    float temp_cm;
+    if (readDistanceBurst(temp_mm, temp_cm, 2)) {
+      Serial.printf("Distance: %.1f cm\n", temp_cm);
+    } else {
+      Serial.println("Read failed");
+    }
+  } else if (command == "benchmark") {
+    runSerialBenchmark();
+  } else if (command == "reset") {
+    Serial.println("Resetting...");
+    delay(1000);
+    ESP.restart();
+  } else if (command == "eeprom_reset") {  // ADD THIS NEW COMMAND
+    Serial.println("Resetting EEPROM to defaults...");
+
+    // Clear the magic number to force re-initialization
+    uint32_t magicNumber = 0;
+    EEPROM.put(EEPROM_SIZE - 4, magicNumber);
+    EEPROM.commit();
+
+    Serial.println("EEPROM reset. Restarting...");
+    delay(1000);
+    ESP.restart();
+  } else if (command == "eeprom_dump") {  // ADD THIS FOR DEBUGGING
+    Serial.println("EEPROM Dump:");
+    for (int i = 0; i < EEPROM_SIZE; i++) {
+      if (i % 16 == 0) Serial.printf("\n%04X: ", i);
+      byte b = EEPROM.read(i);
+      Serial.printf("%02X ", b);
+    }
+    Serial.println();
+  } else if (command == "sleep") {  // ADD DEEP SLEEP COMMAND
+    Serial.println("Manual deep sleep command received");
+    //enterDeepSleep();
+  } else if (command == "sleep_disable") {  // DISABLE DEEP SLEEP
+    deepSleepEnabled = false;
+    Serial.println("Deep sleep disabled");
+  } else if (command == "sleep_enable") {  // ENABLE DEEP SLEEP
+    deepSleepEnabled = true;
+    Serial.println("Deep sleep enabled");
+
+  } else if (command == "battery") {  // ADD BATTERY COMMAND
+    checkBattery();
+    Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+                  batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
+    // } else if (command.startsWith("calibrate ")) {
+    //   // Command: calibrate 4.047
+    //   String val = command.substring(9);
+    //   float actualVoltage = val.toFloat();
+    //   if (actualVoltage > 0) {
+    //     float measuredVoltage = readBatteryVoltage();
+    //     float newCalibration = actualVoltage / measuredVoltage;
+    //     BATTERY_CALIBRATION_FACTOR = newCalibration;
+    //     Serial.printf("Calibration updated: %.2f (Measured: %.3fV, Actual: %.3fV)\n",
+    //                   newCalibration, measuredVoltage, actualVoltage);
+    //   }
+
+  } else if (command.length() > 0) {
+    Serial.printf("Unknown command: '%s'\n", command.c_str());
+    Serial.println("Available commands: mac, read, benchmark, reset, eeprom_reset, eeprom_dump, sleep, sleep_disable, sleep_enable, battery");
+  }
+}
+
+void handleSerialInput() {
+  while (Serial.available()) {
+    char inChar = Serial.read();
+
+    // Handle newline characters (CR or LF)
+    if (inChar == '\n' || inChar == '\r') {
+      if (serialBufferIndex > 0) {
+        serialCommandBuffer[serialBufferIndex] = '\0';
+        String command = String(serialCommandBuffer);
+        processSerialCommand(command);
+        serialBufferIndex = 0;
+      }
+    }
+    // Handle backspace
+    else if (inChar == '\b' || inChar == 127) {
+      if (serialBufferIndex > 0) {
+        serialBufferIndex--;
+        Serial.print("\b \b");  // Echo backspace
+      }
+    }
+    // Regular characters
+    else if (inChar >= 32 && inChar <= 126) {  // Printable characters
+      if (serialBufferIndex < SERIAL_COMMAND_BUFFER_SIZE - 1) {
+        serialCommandBuffer[serialBufferIndex] = inChar;
+        serialBufferIndex++;
+        Serial.print(inChar);  // Echo character
+      }
+    }
+  }
+}
+
 void setup() {
   // 1. Initialize basic hardware first
   initLEDs();
@@ -3215,15 +3237,15 @@ void setup() {
   Serial.println("===============================================");
 
   // 2. Initialize EEPROM and load config EARLY
-  initializeEEPROM(); 
+  initializeEEPROM();
   loadConfig();  // This should happen before any WiFi operations
 
   // 3. Initialize battery ADC
   initBatteryADC();
-  
+
   // 4. Check battery status immediately
   checkBattery();
-  
+
   if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
     Serial.println("CRITICAL: Battery too low. Going to deep sleep immediately.");
     ESP.deepSleep(3600000000);  // 1 hour sleep
@@ -3362,7 +3384,7 @@ void setup() {
   }
 
   // 14. Final setup complete indication
-  Serial.printf("Setup complete - %lumin active / %lumin sleep cycle\n", 
+  Serial.printf("Setup complete - %lumin active / %lumin sleep cycle\n",
                 activeWindow / 60000, sleepDuration / 60000000);
   Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
                 batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
