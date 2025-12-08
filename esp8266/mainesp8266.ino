@@ -2,8 +2,9 @@
  * AquaLevel Pro
  * Designed by: Komkrit Chooraung
  * Date: 28-Nov-2025
- * Version: 3.0
+ * Version: 3.1
  * Added: Deep sleep with 15min active window + 20min sleep
+ * Added: Battery monitoring via ADC with 47K/10K voltage divider
  */
 
 #include <ESP8266WiFi.h>
@@ -28,6 +29,23 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600);  // UTC+7 (Bangkok time)
 #define DEFAULT_SLEEP_DURATION 1200000000  // 20 minutes deep sleep (1200000000 microseconds = 20 * 60 * 1000 * 1000)
 #define DEFAULT_MQTT_INTERVAL 60000        // 1 minute MQTT publish interval
 #define FORCE_WAKE_PIN D0          // GPIO16 for wakeup from deep sleep
+
+// --- Battery Monitoring (ADC with 47K/10K voltage divider) ---
+#define BATTERY_PIN A0                    // A0 for ADC battery reading on ESP8266
+#define ADC_RESOLUTION 1023               // 10-bit ADC (0-1023) for ESP8266
+#define ADC_REFERENCE_VOLTAGE 1.0f        // ESP8266 ADC reference is 1.0V
+#define VOLTAGE_DIVIDER_RATIO 5.7f        // (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
+#define BATTERY_CALIBRATION_FACTOR 3.09f   // Calibration factor for accuracy
+#define BATTERY_READ_INTERVAL 30000       // Check battery every 30 seconds
+
+bool hasBatteryMonitoring = true;
+float batteryVoltage = 0.0f;
+float batteryPercentage = 0.0f;
+bool lowBatteryMode = false;
+#define BATTERY_CRITICAL_THRESHOLD 3.0f   // 3.0V - Critical, go to deep sleep
+#define BATTERY_WARNING_THRESHOLD 3.3f    // 3.3V - Warning level
+#define BATTERY_FULL_THRESHOLD 4.2f       // 4.2V - Full (Li-ion battery)
+#define BATTERY_EMPTY_THRESHOLD 3.0f      // 3.0V - Empty
 
 // EEPROM addresses for sleep configuration
 #define ADDR_SLEEP_ENABLED 120     // bool (1 byte)
@@ -110,6 +128,13 @@ float volume = 0.0f;
 // Sensor data
 uint16_t mm = 0;
 float cm = 0.0f;
+
+// ===== FORWARD DECLARATIONS =====
+void initBatteryADC();
+float readBatteryVoltage();
+void checkBattery();
+String getBatteryStatusString();
+// =================================
 
 // ESP-NOW
 uint8_t senderMAC[] = { 0x5C, 0xCF, 0x7F, 0xF5, 0x3D, 0xE1 };
@@ -226,6 +251,27 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
       text-align: center;
       font-size: 14px;
     }
+    .battery-info {
+      background: #e3f2fd;
+      border: 1px solid #bbdefb;
+      border-radius: 4px;
+      padding: 10px;
+      margin: 10px 0;
+      text-align: center;
+      font-size: 14px;
+    }
+    .battery-level {
+      height: 20px;
+      background: linear-gradient(90deg, #f44336 0%, #ff9800 30%, #4CAF50 100%);
+      border-radius: 3px;
+      margin: 5px 0;
+      overflow: hidden;
+    }
+    .battery-fill {
+      height: 100%;
+      background: #2196F3;
+      transition: width 0.5s ease;
+    }
     .footer {
       margin-top: 2rem;
       padding-top: 1.5rem;
@@ -264,6 +310,17 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
     .footer-meta-item {
       margin: 0.3rem 0;
     }
+    .battery-status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+      margin-left: 5px;
+    }
+    .battery-good { background: #e8f5e8; color: #2e7d32; }
+    .battery-warning { background: #fff3e0; color: #f57c00; }
+    .battery-critical { background: #ffebee; color: #c62828; }
     @media (max-width: 600px) {
       .footer-links {
         gap: 1rem;
@@ -277,6 +334,15 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
     
     <div class="sleep-info" id="sleepInfo">
       Active for: <span id="activeTime">%ACTIVE_TIME%</span> | Next sleep in: <span id="sleepCountdown">%SLEEP_COUNTDOWN%</span>
+    </div>
+    
+    <div class="battery-info" id="batteryInfo">
+      Battery: <span id="batteryVoltage">%BATTERY_VOLTAGE%</span>V 
+      <span class="battery-status" id="batteryStatus">%BATTERY_STATUS%</span>
+      <div class="battery-level">
+        <div class="battery-fill" id="batteryFill" style="width: %BATTERY_PERCENTAGE%%"></div>
+      </div>
+      <div>Charge: <span id="batteryPercentage">%BATTERY_PERCENTAGE%</span>%</div>
     </div>
     
     <div class="next-online" id="nextOnline">
@@ -355,6 +421,7 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
         <p class="footer-meta-item">MAC: %MAC_ADDRESS%</p>
         <p class="footer-meta-item">Uptime: <span id="uptimeValue">%UPTIME%</span></p>
         <p class="footer-meta-item">Valid Readings: <span id="validReadings">%VALID_READINGS%</span></p>
+        <p class="footer-meta-item">Battery: <span id="batteryValue">%BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</span></p>
       </div>
     </div>
 
@@ -373,6 +440,27 @@ const char PAGE_ROOT[] PROGMEM = R"=====(
             document.getElementById('activeTime').textContent = data.active_time || '0m 0s';
             document.getElementById('sleepCountdown').textContent = data.sleep_countdown || '0m 0s';
             document.getElementById('nextOnlineTime').textContent = data.next_online || 'Calculating...';
+            document.getElementById('batteryVoltage').textContent = data.battery_voltage ? data.battery_voltage.toFixed(2) : 'N/A';
+            document.getElementById('batteryPercentage').textContent = data.battery_percentage ? data.battery_percentage.toFixed(0) : 'N/A';
+            
+            // Update battery fill
+            const batteryFill = document.getElementById('batteryFill');
+            if (data.battery_percentage) {
+              batteryFill.style.width = data.battery_percentage.toFixed(0) + '%';
+            }
+            
+            // Update battery status indicator
+            const batteryStatus = document.getElementById('batteryStatus');
+            if (data.battery_voltage >= 3.7) {
+              batteryStatus.className = 'battery-status battery-good';
+              batteryStatus.textContent = 'Good';
+            } else if (data.battery_voltage >= 3.3) {
+              batteryStatus.className = 'battery-status battery-warning';
+              batteryStatus.textContent = 'Low';
+            } else {
+              batteryStatus.className = 'battery-status battery-critical';
+              batteryStatus.textContent = 'Critical';
+            }
             
             const waterLevel = document.getElementById('waterLevel');
             const currentLevel = document.getElementById('currentLevel');
@@ -523,11 +611,26 @@ const char PAGE_CONFIG[] PROGMEM = R"=====(
       padding-top: 20px;
       border-top: 1px solid var(--border-color);
     }
+    .battery-info {
+      background: #e3f2fd;
+      border: 1px solid #bbdefb;
+      border-radius: 4px;
+      padding: 10px;
+      margin-bottom: 20px;
+      text-align: center;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
   <div class="config-form">
     <h2>Tank Configuration</h2>
+    
+    <div class="battery-info">
+      <div>Battery: %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</div>
+      <div>Status: %BATTERY_STATUS%</div>
+    </div>
+    
     <form method='GET' action='/config'>
       <input type='hidden' name='save' value='1'>
       
@@ -708,11 +811,25 @@ const char PAGE_SLEEP_CONFIG[] PROGMEM = R"=====(
     .info-item {
       margin: 5px 0;
     }
+    .battery-info {
+      background: #e3f2fd;
+      border: 1px solid #bbdefb;
+      border-radius: 4px;
+      padding: 10px;
+      margin: 10px 0;
+      text-align: center;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <h2>Sleep Configuration</h2>
+    
+    <div class="battery-info">
+      <div><strong>Battery:</strong> %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%) - %BATTERY_STATUS%</div>
+      <div><strong>Note:</strong> Device will enter extended deep sleep if battery falls below 3.0V</div>
+    </div>
     
     <div class="current-info">
       <div class="info-item"><strong>Current Status:</strong> %SLEEP_STATUS%</div>
@@ -799,15 +916,27 @@ const char PAGE_SLEEP_SAVED[] PROGMEM = R"=====(
       margin-bottom: 1.5rem;
       color: #555;
     }
+    .battery-info {
+      background: #e3f2fd;
+      border: 1px solid #bbdefb;
+      border-radius: 4px;
+      padding: 10px;
+      margin: 15px 0;
+      font-size: 14px;
+    }
     .back-link {
       display: inline-block;
       margin-top: 1rem;
       color: var(--primary);
       text-decoration: none;
       font-weight: 500;
+      margin: 0 10px;
     }
     .back-link:hover {
       text-decoration: underline;
+    }
+    .links {
+      margin-top: 1.5rem;
     }
   </style>
 </head>
@@ -816,8 +945,15 @@ const char PAGE_SLEEP_SAVED[] PROGMEM = R"=====(
     <div class="success-icon">✓</div>
     <h1>Sleep Configuration Saved</h1>
     <p>Sleep settings have been updated successfully.</p>
-    <a href="/sleep-config" class="back-link">← Back to Sleep Config</a>
-    <a href="/" class="back-link">← Back to Dashboard</a>
+    
+    <div class="battery-info">
+      <p><strong>Current Battery:</strong> %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</p>
+    </div>
+    
+    <div class="links">
+      <a href="/sleep-config" class="back-link">← Back to Sleep Config</a>
+      <a href="/" class="back-link">← Back to Dashboard</a>
+    </div>
   </div>
 </body>
 </html>
@@ -920,6 +1056,15 @@ const char PAGE_WIFI_SETUP[] PROGMEM = R"=====(
       font-family: monospace;
       margin-top: 5px;
     }
+    .battery-info {
+      background: #e3f2fd;
+      border: 1px solid #bbdefb;
+      border-radius: 4px;
+      padding: 10px;
+      margin: 10px 0;
+      text-align: center;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
@@ -929,6 +1074,11 @@ const char PAGE_WIFI_SETUP[] PROGMEM = R"=====(
     <div class="current-info">
       <div><strong>Current Device:</strong> %DEVICE_NAME%</div>
       <div class="current-mac">MAC: %MAC_ADDRESS%</div>
+    </div>
+    
+    <div class="battery-info">
+      <div><strong>Battery:</strong> %BATTERY_VOLTAGE%V (%BATTERY_PERCENTAGE%%)</div>
+      <div><strong>Status:</strong> %BATTERY_STATUS%</div>
     </div>
     
     <form method="post" action="/wifi-setup">
@@ -1011,6 +1161,7 @@ const char PAGE_WIFI_SAVED[] PROGMEM = R"=====(
       font-size: 1.2rem;
       font-weight: bold;
       color: var(--primary);
+      margin-top: 1rem;
     }
     .progress-bar {
       height: 4px;
@@ -1155,6 +1306,7 @@ const char PAGE_BENCHMARK_FORM[] PROGMEM = R"=====(
 </body>
 </html>
 )=====";
+
 
 // ===== NEXT ONLINE TIME CALCULATION =====
 String getNextOnlineTime() {
@@ -1437,13 +1589,21 @@ void processSerialCommand(String command) {
   command.toLowerCase();
 
   if (command == "mac") {
-    // ... existing mac command code ...
+    Serial.printf("MAC Address: %s\n", WiFi.macAddress().c_str());
   } else if (command == "read") {
-    // ... existing read command code ...
+    uint16_t temp_mm;
+    float temp_cm;
+    if (readDistanceBurst(temp_mm, temp_cm, 2)) {
+      Serial.printf("Distance: %.1f cm\n", temp_cm);
+    } else {
+      Serial.println("Read failed");
+    }
   } else if (command == "benchmark") {
-    // ... existing benchmark code ...
+    runSerialBenchmark();
   } else if (command == "reset") {
-    // ... existing reset code ...
+    Serial.println("Resetting...");
+    delay(1000);
+    ESP.restart();
   } else if (command == "eeprom_reset") {  // ADD THIS NEW COMMAND
     Serial.println("Resetting EEPROM to defaults...");
 
@@ -1472,9 +1632,13 @@ void processSerialCommand(String command) {
   } else if (command == "sleep_enable") {  // ENABLE DEEP SLEEP
     deepSleepEnabled = true;
     Serial.println("Deep sleep enabled");
+  // } else if (command == "battery") {  // ADD BATTERY COMMAND
+  //   checkBattery();
+  //   Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+  //                 batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
   } else if (command.length() > 0) {
     Serial.printf("Unknown command: '%s'\n", command.c_str());
-    Serial.println("Available commands: mac, read, benchmark, reset, eeprom_reset, eeprom_dump, sleep, sleep_disable, sleep_enable");
+    Serial.println("Available commands: mac, read, benchmark, reset, eeprom_reset, eeprom_dump, sleep, sleep_disable, sleep_enable, battery");
   }
 }
 
@@ -1971,6 +2135,17 @@ void enterDeepSleep() {
     return;
   }
   
+  // Check battery before entering deep sleep
+  checkBattery();
+  
+  if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
+    Serial.println("Battery critically low. Entering extended deep sleep (1 hour)...");
+    
+    // Extended sleep for low battery
+    ESP.deepSleep(3600000000);  // 1 hour
+    return;
+  }
+  
   Serial.println("Preparing for deep sleep...");
   
   // Save current state to EEPROM if needed
@@ -1983,6 +2158,7 @@ void enterDeepSleep() {
   
   Serial.println("Entering deep sleep...");
   Serial.printf("Active window was: %lu ms\n", millis() - activeWindowStart);
+  Serial.printf("Battery: %.2fV (%.0f%%)\n", batteryVoltage, batteryPercentage);
   
   // Blink LED to indicate sleep
   //blinkBlueLED(3, 200);
@@ -2016,6 +2192,8 @@ String formatRuntime(unsigned long ms) {
 
 void handleRoot() {
   updateMeasurements();
+  checkBattery();  // Update battery info
+  
   String waterColor = (percent < 20) ? "#ff4444" : "#4285f4";
   float maxVolume = volumeFactor * tankHeight;
 
@@ -2053,12 +2231,18 @@ void handleRoot() {
   html.replace("%ACTIVE_TIME%", activeTimeStr);
   html.replace("%SLEEP_COUNTDOWN%", sleepCountdownStr);
   html.replace("%NEXT_ONLINE_TIME%", getNextOnlineTime());
+  
+  // Add battery info
+  html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+  html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+  html.replace("%BATTERY_STATUS%", getBatteryStatusString());
 
   server.send(200, "text/html", html);
 }
 
 void handleData() {
   updateMeasurements();
+  checkBattery();  // Update battery info
 
   // Include sensor health information
   bool hasRecent = sensorManager.hasRecentReading();
@@ -2080,8 +2264,10 @@ void handleData() {
   json += "\"uptime\":\"" + formatRuntime(millis()) + "\",";
   json += "\"sensor_health\":" + String(hasRecent ? "true" : "false") + ",";
   json += "\"valid_readings\":" + String(validReadings) + ",";
-  json += "\"active_time\":\"" + String(activeMinutes) + "m " + String(activeSeconds) + "s\","; 
+  json += "\"active_time\":\"" + String(activeMinutes) + "m " + String(activeSeconds) + "s\",";
   json += "\"sleep_countdown\":\"" + String(sleepMinutes) + "m " + String(sleepSeconds) + "s\",";
+  json += "\"battery_voltage\":" + String(batteryVoltage, 2) + ",";
+  json += "\"battery_percentage\":" + String(batteryPercentage, 0) + ",";
   json += "\"next_online\":\"" + getNextOnlineTime() + "\"";
   json += "}";
 
@@ -2094,6 +2280,9 @@ void handleSensorStats() {
 }
 
 void handleConfig() {
+  // Update battery info first
+  checkBattery();
+  
   // Handle form submission
   if (server.hasArg("save")) {
     if (server.hasArg("preset_mode") && server.arg("preset_mode") == "1") {
@@ -2131,12 +2320,18 @@ void handleConfig() {
   html.replace("%TANK_WIDTH%", String(tankWidth, 1));
   html.replace("%TANK_HEIGHT%", String(tankHeight, 1));
   html.replace("%CALIBRATION%", String(calibration_mm / 10.0f, 1));
+  html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+  html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+  html.replace("%BATTERY_STATUS%", getBatteryStatusString());
 
   server.send(200, "text/html", html);
 }
 
 // Sleep Configuration Page
 void handleSleepConfig() {
+  // Update battery info first
+  checkBattery();
+  
   if (server.hasArg("save")) {
     // Handle form submission
     deepSleepEnabled = server.hasArg("sleep_enabled");
@@ -2156,8 +2351,13 @@ void handleSleepConfig() {
     // Save configuration to EEPROM
     saveSleepConfig();
     
+    // Generate saved page with battery info
+    String html = FPSTR(PAGE_SLEEP_SAVED);
+    html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+    html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+    
     // Send success response
-    server.send(200, "text/html", FPSTR(PAGE_SLEEP_SAVED));
+    server.send(200, "text/html", html);
     return;
   }
 
@@ -2173,6 +2373,9 @@ void handleSleepConfig() {
   html.replace("%SLEEP_DURATION%", String(sleepDuration / 60000000));
   html.replace("%MQTT_INTERVAL_VAL%", String(mqttPublishInterval / 1000));
   html.replace("%SLEEP_CHECKED%", deepSleepEnabled ? "checked" : "");
+  html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+  html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+  html.replace("%BATTERY_STATUS%", getBatteryStatusString());
 
   server.send(200, "text/html", html);
 }
@@ -2470,6 +2673,9 @@ void handleBenchmark() {
 
 // Add this function to handle WiFi setup page
 void handleWiFiSetup() {
+  // Update battery info first
+  checkBattery();
+  
   if (server.hasArg("save")) {
     String newSSID = server.arg("ssid");
     String newPass = server.arg("password");
@@ -2518,6 +2724,9 @@ void handleWiFiSetup() {
     html.replace("%SSID%", String(ssidBuf));
     html.replace("%PASSWORD%", String(passBuf));
     html.replace("%MAC%", macStr);
+    html.replace("%BATTERY_VOLTAGE%", String(batteryVoltage, 2));
+    html.replace("%BATTERY_PERCENTAGE%", String(batteryPercentage, 0));
+    html.replace("%BATTERY_STATUS%", getBatteryStatusString());
 
     server.send(200, "text/html", html);
   }
@@ -2587,13 +2796,11 @@ void publishMQTTStatus() {
     return;
   }
 
-  char payload[256];
-  
-  // Try to get NTP time, but fallback to millis() if not synced
-  String timestamp = getCustomTimestamp();
+  // Update battery before publishing
+  checkBattery();
 
-  // Get formatted uptime
-  String uptimeStr = formatRuntime(millis());
+  char payload[350];  // Increased buffer size for battery info
+  String timestamp = getCustomTimestamp();
 
   // Calculate next sleep time
   String nextSleepTime;
@@ -2641,15 +2848,21 @@ void publishMQTTStatus() {
            "\"distance_cm\":%.1f,"
            "\"level_percent\":%.1f,"
            "\"volume_liters\":%.1f,"
+           "\"battery_voltage\":%.2f,"
+           "\"battery_percentage\":%.0f,"
+           "\"battery_status\":\"%s\","
            "\"next_sleep\":\"%s\","
            "\"next_online\":\"%s\"}",
            timestamp.c_str(),
-           uptimeStr.c_str(),  // Added uptime back here
+           formatRuntime(millis()).c_str(),
            deviceName,
            WiFi.localIP().toString().c_str(),
            cm,
            percent,
            volume,
+           batteryVoltage,
+           batteryPercentage,
+           getBatteryStatusString().c_str(),
            nextSleepTime.c_str(),
            nextOnlineTime.c_str());
 
@@ -2894,6 +3107,99 @@ bool connectToWiFi() {
   }
 }
 
+// ===== BATTERY FUNCTIONS =====
+
+void initBatteryADC() {
+  // ESP8266 uses A0 for ADC
+  // Note: ESP8266 ADC has 10-bit resolution (0-1023) and 1.0V reference
+  Serial.println("Battery ADC initialized (47K/10K voltage divider)");
+  Serial.printf("ADC Resolution: %d bits\n", ADC_RESOLUTION + 1); // 10-bit = 0-1023
+  Serial.printf("ADC Reference: %.2fV\n", ADC_REFERENCE_VOLTAGE);
+  Serial.printf("Voltage Divider Ratio: %.1f\n", VOLTAGE_DIVIDER_RATIO);
+  Serial.printf("Calibration Factor: %.2f\n", BATTERY_CALIBRATION_FACTOR);
+}
+
+float readBatteryVoltage() {
+  // Take multiple readings for stability
+  int samples = 10;
+  long sum = 0;
+
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(BATTERY_PIN);
+    delay(2);
+  }
+
+  float averageADC = (float)sum / samples;
+
+  // Calculate voltage with voltage divider
+  // ESP8266 ADC: 0-1023 represents 0-1.0V (ADC reference is 1.0V)
+  // Formula: Vbatt = (ADC_reading * Vref / ADC_max) * ((R1 + R2) / R2)
+  float measuredVoltage = (averageADC * ADC_REFERENCE_VOLTAGE / ADC_RESOLUTION) * VOLTAGE_DIVIDER_RATIO;
+
+  // Apply calibration factor
+  measuredVoltage *= BATTERY_CALIBRATION_FACTOR;
+
+  return measuredVoltage;
+}
+
+void checkBattery() {
+  if (!hasBatteryMonitoring) return;
+
+  // Read battery voltage from ADC
+  batteryVoltage = readBatteryVoltage();
+
+  // Calculate battery percentage (simple linear approximation for Li-ion)
+  if (batteryVoltage >= BATTERY_FULL_THRESHOLD) {
+    batteryPercentage = 100.0f;
+  } else if (batteryVoltage <= BATTERY_EMPTY_THRESHOLD) {
+    batteryPercentage = 0.0f;
+  } else {
+    // Linear interpolation between empty and full thresholds
+    batteryPercentage = ((batteryVoltage - BATTERY_EMPTY_THRESHOLD) / (BATTERY_FULL_THRESHOLD - BATTERY_EMPTY_THRESHOLD)) * 100.0f;
+    batteryPercentage = constrain(batteryPercentage, 0.0f, 100.0f);
+  }
+
+  // Check if battery is critically low
+  if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
+    lowBatteryMode = true;
+    Serial.printf("CRITICAL: Battery voltage %.2fV is below %.2fV threshold\n",
+                  batteryVoltage, BATTERY_CRITICAL_THRESHOLD);
+
+    // If battery is critically low, go to extended deep sleep
+    if (deepSleepEnabled) {
+      Serial.println("Battery critically low. Entering extended deep sleep...");
+
+      // Disable WiFi and MQTT to save power
+      WiFi.disconnect();
+      mqttClient.disconnect();
+
+      // Save current config
+      saveConfig();
+
+      // Enter deep sleep for 1 hour (or longer) to conserve battery
+      ESP.deepSleep(3600000000);  // 1 hour in microseconds
+    }
+  } else if (batteryVoltage < BATTERY_WARNING_THRESHOLD) {
+    lowBatteryMode = true;
+    Serial.printf("WARNING: Battery voltage %.2fV is low\n", batteryVoltage);
+  } else {
+    lowBatteryMode = false;
+  }
+
+  static unsigned long lastBatteryLog = 0;
+  if (millis() - lastBatteryLog > 60000) {  // Log every minute
+    lastBatteryLog = millis();
+    Serial.printf("Battery: %.2fV (%.0f%%)\n", batteryVoltage, batteryPercentage);
+  }
+}
+
+String getBatteryStatusString() {
+  if (!hasBatteryMonitoring) return "No ADC";
+
+  if (batteryVoltage >= 3.7f) return "Good";
+  if (batteryVoltage >= 3.3f) return "Low";
+  return "Critical";
+}
 
 void setup() {
   // 1. Initialize basic hardware first
@@ -2912,7 +3218,18 @@ void setup() {
   initializeEEPROM(); 
   loadConfig();  // This should happen before any WiFi operations
 
-  // 3. Initialize sensor serial
+  // 3. Initialize battery ADC
+  initBatteryADC();
+  
+  // 4. Check battery status immediately
+  checkBattery();
+  
+  if (batteryVoltage < BATTERY_CRITICAL_THRESHOLD) {
+    Serial.println("CRITICAL: Battery too low. Going to deep sleep immediately.");
+    ESP.deepSleep(3600000000);  // 1 hour sleep
+  }
+
+  // 5. Initialize sensor serial
   sensorSerial.begin(9600);
   sensorSerial.setTimeout(50);
 
@@ -2933,7 +3250,7 @@ void setup() {
   mqttClient.setServer(MQTT_HOST, MQTT_PORT);
 
 
-  // 4. Try normal Wi-Fi connection
+  // 6. Try normal Wi-Fi connection
   WiFi.mode(WIFI_STA);  // Explicitly set to station mode
   if (!connectToWiFi()) {
     Serial.println("WiFi failed, starting AP mode");
@@ -2950,7 +3267,7 @@ void setup() {
     blinkGreenLED(3);
   }
 
-  // 5. OTA Setup (should be after WiFi connection)
+  // 7. OTA Setup (should be after WiFi connection)
   ArduinoOTA.setHostname(deviceName);
   ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.onStart([]() {
@@ -2971,18 +3288,18 @@ void setup() {
   });
   ArduinoOTA.begin();
 
-  // 6. mDNS Setup
+  // 8. mDNS Setup
   if (MDNS.begin(deviceName)) {
     MDNS.addService("http", "tcp", 80);
     MDNS.addService("ota", "tcp", 3232);
     Serial.println("mDNS responder started");
   }
 
-  // 7. DNS Server Setup
+  // 9. DNS Server Setup
   IPAddress localIP = WiFi.getMode() == WIFI_AP ? WiFi.softAPIP() : WiFi.localIP();
   dnsServer.start(DNS_PORT, "*", localIP);
 
-  // 8. Web Server Setup
+  // 10. Web Server Setup
   server.on("/", handleRoot);
   server.on("/wifi-setup", handleWiFiSetup);
   server.on("/config", handleConfig);
@@ -2993,7 +3310,7 @@ void setup() {
   server.onNotFound(handleRoot);
   server.begin();
 
-  // 10. ESP-NOW Setup
+  // 11. ESP-NOW Setup
   if (esp_now_init() != 0) {
     Serial.println("{\"error\":\"ESP-NOW init failed\"}");
     delay(1000);
@@ -3016,11 +3333,11 @@ void setup() {
     Serial.println("{\"error\":\"Failed to add peer\"}");
   }
 
-  // 11. Set active window start time
+  // 12. Set active window start time
   activeWindowStart = millis();
   Serial.println("Active window started");
 
-  // 12. Initial sensor operations
+  // 13. Initial sensor operations
   Serial.printf("{\"status\":\"Ready\",\"calibration_cm\":%.1f}\n", calibration_mm / 10.0f);
 
   // Sensor health check
@@ -3044,9 +3361,11 @@ void setup() {
     Serial.println("{\"warning\":\"sensor_not_responding\"}");
   }
 
-  // 13. Final setup complete indication
+  // 14. Final setup complete indication
   Serial.printf("Setup complete - %lumin active / %lumin sleep cycle\n", 
                 activeWindow / 60000, sleepDuration / 60000000);
+  Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+                batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
   blinkGreenLED(2);
 }
 
@@ -3062,6 +3381,13 @@ void loop() {
   // Check active window timeout
   checkActiveWindow();
 
+  // Check battery periodically
+  static unsigned long lastBatteryCheck = 0;
+  if (millis() - lastBatteryCheck >= BATTERY_READ_INTERVAL) {
+    lastBatteryCheck = millis();
+    checkBattery();
+  }
+
   // Handle WiFi reconnection less frequently
   static unsigned long lastWifiCheck = 0;
   if (millis() - lastWifiCheck >= 60000) {  // Every 1min
@@ -3070,6 +3396,8 @@ void loop() {
                   ESP.getFreeHeap(),
                   WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected",
                   mqttClient.connected() ? "Connected" : "Disconnected");
+    Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+                  batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnect");
       WiFi.disconnect();
