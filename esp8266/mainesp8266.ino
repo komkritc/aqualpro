@@ -31,12 +31,12 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600);  // UTC+7 (Bangkok time)
 #define FORCE_WAKE_PIN D0                  // GPIO16 for wakeup from deep sleep
 
 // --- Battery Monitoring (ADC with 47K/10K voltage divider) ---
-#define BATTERY_PIN A0                    // A0 for ADC battery reading on ESP8266
-#define ADC_RESOLUTION 1023               // 10-bit ADC (0-1023) for ESP8266
-#define ADC_REFERENCE_VOLTAGE 3.2f        // ESP8266 ADC reference is 1.0V
-#define VOLTAGE_DIVIDER_RATIO 5.7f        // (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
-#define BATTERY_CALIBRATION_FACTOR 1.0f   // Calibration factor for accuracy
-#define BATTERY_READ_INTERVAL 30000       // Check battery every 30 seconds
+#define BATTERY_PIN A0                   // A0 for ADC battery reading on ESP8266
+#define ADC_RESOLUTION 1023              // 10-bit ADC (0-1023) for ESP8266
+#define ADC_REFERENCE_VOLTAGE 3.2f       // ESP8266 ADC reference is 1.0V
+#define VOLTAGE_DIVIDER_RATIO 5.7f       // (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
+#define BATTERY_CALIBRATION_FACTOR 1.0f  // Calibration factor for accuracy
+#define BATTERY_READ_INTERVAL 30000      // Check battery every 30 seconds
 
 bool hasBatteryMonitoring = true;
 float batteryVoltage = 0.0f;
@@ -3169,23 +3169,10 @@ void processSerialCommand(String command) {
   } else if (command == "sleep_enable") {  // ENABLE DEEP SLEEP
     deepSleepEnabled = true;
     Serial.println("Deep sleep enabled");
-
   } else if (command == "battery") {  // ADD BATTERY COMMAND
     checkBattery();
     Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
                   batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
-    // } else if (command.startsWith("calibrate ")) {
-    //   // Command: calibrate 4.047
-    //   String val = command.substring(9);
-    //   float actualVoltage = val.toFloat();
-    //   if (actualVoltage > 0) {
-    //     float measuredVoltage = readBatteryVoltage();
-    //     float newCalibration = actualVoltage / measuredVoltage;
-    //     BATTERY_CALIBRATION_FACTOR = newCalibration;
-    //     Serial.printf("Calibration updated: %.2f (Measured: %.3fV, Actual: %.3fV)\n",
-    //                   newCalibration, measuredVoltage, actualVoltage);
-    //   }
-
   } else if (command.length() > 0) {
     Serial.printf("Unknown command: '%s'\n", command.c_str());
     Serial.println("Available commands: mac, read, benchmark, reset, eeprom_reset, eeprom_dump, sleep, sleep_disable, sleep_enable, battery");
