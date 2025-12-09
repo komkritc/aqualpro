@@ -32,9 +32,9 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600);  // UTC+7 (Bangkok time)
 
 // --- Battery Monitoring (ADC with 47K/10K voltage divider) ---
 #define BATTERY_PIN A0                   // A0 for ADC battery reading on ESP8266
-#define ADC_RESOLUTION 1023              // 10-bit ADC (0-1023) for ESP8266
-#define ADC_REFERENCE_VOLTAGE 3.2f       // ESP8266 ADC reference is 1.0V
-#define VOLTAGE_DIVIDER_RATIO 5.7f       // (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
+#define ADC_RESOLUTION 1024.0f           // ESP8266 has 10-bit ADC (0-1023)
+#define ADC_REFERENCE_VOLTAGE 3.3f       // ESP8266 ADC reference is actually ~1.0V internally
+#define VOLTAGE_DIVIDER_RATIO 5.7f       // (47000 + 10000) / 10000 = 5.7
 #define BATTERY_CALIBRATION_FACTOR 1.0f  // Calibration factor for accuracy
 #define BATTERY_READ_INTERVAL 30000      // Check battery every 30 seconds
 
@@ -92,7 +92,7 @@ void updateMQTTTopic() {
 #define LED_BLUE D4   // Status/Activity LED
 #define LED_RED D7    // Error/AP Mode LED
 #define LED_GREEN D8  // WiFi Connected LED
-#define LED_ON HIGH   // Assuming common cathode (LOW turns on)
+#define LED_ON HIGH
 #define LED_OFF LOW
 
 #define RX_PIN D1
@@ -2102,7 +2102,7 @@ String formatRuntime(unsigned long ms) {
 
 void handleRoot() {
   updateMeasurements();
-  checkBattery();  // Update battery info
+  // checkBattery();  // Update battery info
 
   String waterColor = (percent < 20) ? "#ff4444" : "#4285f4";
   float maxVolume = volumeFactor * tankHeight;
@@ -2152,7 +2152,7 @@ void handleRoot() {
 
 void handleData() {
   updateMeasurements();
-  checkBattery();  // Update battery info
+  // checkBattery();  // Update battery info
 
   // Include sensor health information
   bool hasRecent = sensorManager.hasRecentReading();
@@ -2191,7 +2191,7 @@ void handleSensorStats() {
 
 void handleConfig() {
   // Update battery info first
-  checkBattery();
+  // checkBattery();
 
   // Handle form submission
   if (server.hasArg("save")) {
@@ -2240,7 +2240,7 @@ void handleConfig() {
 // Sleep Configuration Page
 void handleSleepConfig() {
   // Update battery info first
-  checkBattery();
+  // checkBattery();
 
   if (server.hasArg("save")) {
     // Handle form submission
@@ -2584,7 +2584,7 @@ void handleBenchmark() {
 // Add this function to handle WiFi setup page
 void handleWiFiSetup() {
   // Update battery info first
-  checkBattery();
+  // checkBattery();
 
   if (server.hasArg("save")) {
     String newSSID = server.arg("ssid");
@@ -2707,7 +2707,7 @@ void publishMQTTStatus() {
   }
 
   // Update battery before publishing
-  checkBattery();
+  // checkBattery();
 
   char payload[350];  // Increased buffer size for battery info
   String timestamp = getCustomTimestamp();
@@ -3020,45 +3020,110 @@ bool connectToWiFi() {
 // ===== BATTERY FUNCTIONS =====
 
 void initBatteryADC() {
-  // ESP8266 uses A0 for ADC
-  // Note: ESP8266 ADC has 10-bit resolution (0-1023) and 1.0V reference
-  Serial.println("Battery ADC initialized (47K/10K voltage divider)");
-  Serial.printf("ADC Resolution: %d bits\n", ADC_RESOLUTION + 1);  // 10-bit = 0-1023
-  Serial.printf("ADC Reference: %.2fV\n", ADC_REFERENCE_VOLTAGE);
+  if (!hasBatteryMonitoring) {
+    Serial.println("Battery monitoring disabled in config");
+    return;
+  }
+  
+  // Initialize ADC for battery monitoring
+  // ESP8266 uses A0 pin for ADC with internal 1.0V reference
+  
+  Serial.println("==============================================");
+  Serial.println("BATTERY MONITORING INITIALIZATION");
+  Serial.println("==============================================");
+  Serial.printf("ADC Pin: A0 (GPIO %d)\n", BATTERY_PIN);
+  Serial.printf("ADC Resolution: 10-bit (0-1023)\n");
+  Serial.printf("ADC Reference Voltage: 1.0V (ESP8266 internal)\n");
+  Serial.printf("Voltage Divider: 47KΩ / 10KΩ\n");
   Serial.printf("Voltage Divider Ratio: %.1f\n", VOLTAGE_DIVIDER_RATIO);
-  Serial.printf("Calibration Factor: %.2f\n", BATTERY_CALIBRATION_FACTOR);
+  Serial.printf("Calibration Factor: %.3f\n", BATTERY_CALIBRATION_FACTOR);
+  Serial.printf("Battery Thresholds:\n");
+  Serial.printf("  - Full: %.1fV (Li-ion 100%%)\n", BATTERY_FULL_THRESHOLD);
+  Serial.printf("  - Warning: %.1fV\n", BATTERY_WARNING_THRESHOLD);
+  Serial.printf("  - Critical: %.1fV (deep sleep)\n", BATTERY_CRITICAL_THRESHOLD);
+  Serial.printf("  - Empty: %.1fV (0%%)\n", BATTERY_EMPTY_THRESHOLD);
+  Serial.println("==============================================");
+  
+  // Configure ADC pin
+  pinMode(BATTERY_PIN, INPUT);
+  
+  // Optional: Set ADC read resolution
+  //analogReadResolution(10);  // 10-bit resolution (default)
+  
+  // Optional: Set ADC attenuation (if supported - ESP32 only, not ESP8266)
+  // For ESP8266, attenuation is fixed
+  
+  // Take an initial reading to stabilize ADC
+  float initialReading = readBatteryVoltage();
+  Serial.printf("Initial Battery Reading: %.3fV\n", initialReading);
+  
+  // Verify reading is reasonable
+  if (initialReading < 2.0f || initialReading > 5.0f) {
+    Serial.println("[WARNING] Initial battery reading appears incorrect!");
+    Serial.println("Check voltage divider wiring and resistor values.");
+    
+    // Optional: You might want to disable battery monitoring if readings are clearly wrong
+    // hasBatteryMonitoring = false;
+  }
+  
+  Serial.println("Battery ADC initialized successfully");
+  Serial.println("==============================================");
+}
+
+String getBatteryStatusString() {
+  if (!hasBatteryMonitoring) return "No ADC";
+
+  if (batteryVoltage >= 3.7f) {
+    return "Good";
+  } else if (batteryVoltage >= 3.3f) {
+    return "Low";
+  } else if (batteryVoltage >= BATTERY_CRITICAL_THRESHOLD) {
+    return "Warning";
+  } else {
+    return "Critical";
+  }
 }
 
 float readBatteryVoltage() {
-  // Take multiple readings for stability
-  int samples = 10;
+  if (!hasBatteryMonitoring) return 0.0f;
+
+  // Quick reading - 10 samples for good accuracy
   long sum = 0;
-
-  for (int i = 0; i < samples; i++) {
+  for (int i = 0; i < 10; i++) {
     sum += analogRead(BATTERY_PIN);
-    delay(2);
+    delay(5); // Better ADC stability, fewer noisy spikes
   }
-
-  float averageADC = (float)sum / samples;
-
-  // ESP8266 ADC: 0-1023 represents 0-1.0V
-  // Voltage divider ratio: (R1 + R2) / R2 = (47000 + 10000) / 10000 = 5.7
-  // Formula: Vbatt = (ADC_reading * 1.0V / 1023) * 5.7
-
-  // First: Convert ADC reading to voltage at divider output
-  float dividerOutputVoltage = averageADC * 1.0 / 1023.0;
-
-  // Second: Calculate battery voltage (before divider)
-  float measuredVoltage = dividerOutputVoltage * VOLTAGE_DIVIDER_RATIO;
-
-  // Debug output
-  Serial.printf("ADC: %.1f, Divider Out: %.3fV, Battery: %.3fV\n",
-                averageADC, dividerOutputVoltage, measuredVoltage);
-
-  // Apply calibration factor if needed
-  measuredVoltage *= BATTERY_CALIBRATION_FACTOR;
-
-  return measuredVoltage;
+  
+  float averageADC = (float)sum / 10.0f;
+  
+  // CALIBRATION FACTOR BASED ON YOUR MEASUREMENTS:
+  // Original: 3.89V battery ÷ 234 ADC = 0.0166239
+  // Adjusted: 3.89V battery ÷ 229 ADC = 0.016986
+  static const float CALIBRATION = 0.016624f;  // Current working value
+  
+  float batteryVoltage = averageADC * CALIBRATION;
+  
+  // Simple moving average for smoothing
+  static float smoothedVoltage = batteryVoltage;
+  static bool firstReading = true;
+  
+  if (firstReading) {
+    smoothedVoltage = batteryVoltage;
+    firstReading = false;
+  } else {
+    // Low-pass filter: 70% new, 30% old
+    smoothedVoltage = (batteryVoltage * 0.7f) + (smoothedVoltage * 0.3f);
+  }
+  
+  // Log occasionally to avoid Serial spam
+  static unsigned long lastLog = 0;
+  if (millis() - lastLog > 60000) {  // Log every 60 seconds
+    lastLog = millis();
+    Serial.printf("[BATT] ADC: %.1f -> %.2fV (smoothed: %.2fV)\n", 
+                  averageADC, batteryVoltage, smoothedVoltage);
+  }
+  
+  return smoothedVoltage;
 }
 
 void checkBattery() {
@@ -3066,7 +3131,9 @@ void checkBattery() {
 
   // Read battery voltage from ADC
   batteryVoltage = readBatteryVoltage();
-  Serial.printf("DEBUG: Battery voltage = %.3fV\n", batteryVoltage);
+  
+  // Debug output
+  // Serial.printf("DEBUG: Battery voltage = %.3fV\n", batteryVoltage);
 
   // Calculate battery percentage (simple linear approximation for Li-ion)
   if (batteryVoltage >= BATTERY_FULL_THRESHOLD) {
@@ -3075,7 +3142,8 @@ void checkBattery() {
     batteryPercentage = 0.0f;
   } else {
     // Linear interpolation between empty and full thresholds
-    batteryPercentage = ((batteryVoltage - BATTERY_EMPTY_THRESHOLD) / (BATTERY_FULL_THRESHOLD - BATTERY_EMPTY_THRESHOLD)) * 100.0f;
+    batteryPercentage = ((batteryVoltage - BATTERY_EMPTY_THRESHOLD) / 
+                        (BATTERY_FULL_THRESHOLD - BATTERY_EMPTY_THRESHOLD)) * 100.0f;
     batteryPercentage = constrain(batteryPercentage, 0.0f, 100.0f);
   }
 
@@ -3098,6 +3166,8 @@ void checkBattery() {
 
       // Enter deep sleep for 1 hour (or longer) to conserve battery
       ESP.deepSleep(3600000000);  // 1 hour in microseconds
+      
+      // Code execution stops here if deep sleep is successful
     }
   } else if (batteryVoltage < BATTERY_WARNING_THRESHOLD) {
     lowBatteryMode = true;
@@ -3106,20 +3176,52 @@ void checkBattery() {
     lowBatteryMode = false;
   }
 
+  // Log battery status periodically (every minute)
   static unsigned long lastBatteryLog = 0;
   if (millis() - lastBatteryLog > 60000) {  // Log every minute
     lastBatteryLog = millis();
-    Serial.printf("Battery: %.2fV (%.0f%%)\n", batteryVoltage, batteryPercentage);
+    
+    // Get battery status string for logging
+    String statusStr = getBatteryStatusString();
+    
+    Serial.printf("Battery Status: %.2fV (%.0f%%) - %s\n", 
+                  batteryVoltage, batteryPercentage, statusStr.c_str());
+    
+    // Also log to MQTT if connected (optional)
+    if (mqttClient.connected()) {
+      char mqttPayload[100];
+      snprintf(mqttPayload, sizeof(mqttPayload),
+               "{\"battery_voltage\":%.2f,\"battery_percentage\":%.0f,\"status\":\"%s\"}",
+               batteryVoltage, batteryPercentage, statusStr.c_str());
+      
+      // Create topic for battery status
+      char batteryTopic[64];
+      snprintf(batteryTopic, sizeof(batteryTopic), "%s/battery", deviceName);
+      
+      mqttClient.publish(batteryTopic, 0, false, mqttPayload);
+    }
+  }
+  
+  // Update LED indicator based on battery status
+  static unsigned long lastBatteryLEDUpdate = 0;
+  if (millis() - lastBatteryLEDUpdate > 5000) {  // Update every 5 seconds
+    lastBatteryLEDUpdate = millis();
+    
+    if (lowBatteryMode) {
+      // Blink red LED for low battery warning
+      static bool ledState = false;
+      digitalWrite(LED_RED, ledState ? LED_ON : LED_OFF);
+      ledState = !ledState;
+    } else if (batteryVoltage < BATTERY_WARNING_THRESHOLD) {
+      // Solid red LED for warning level
+      digitalWrite(LED_RED, LED_ON);
+    } else {
+      // Turn off red LED for normal battery
+      digitalWrite(LED_RED, LED_OFF);
+    }
   }
 }
 
-String getBatteryStatusString() {
-  if (!hasBatteryMonitoring) return "No ADC";
-
-  if (batteryVoltage >= 3.7f) return "Good";
-  if (batteryVoltage >= 3.3f) return "Low";
-  return "Critical";
-}
 
 void processSerialCommand(String command) {
   command.trim();
@@ -3390,7 +3492,7 @@ void loop() {
   // Check active window timeout
   checkActiveWindow();
 
-  // Check battery periodically
+  //Check battery periodically
   static unsigned long lastBatteryCheck = 0;
   if (millis() - lastBatteryCheck >= BATTERY_READ_INTERVAL) {
     lastBatteryCheck = millis();
@@ -3405,8 +3507,8 @@ void loop() {
                   ESP.getFreeHeap(),
                   WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected",
                   mqttClient.connected() ? "Connected" : "Disconnected");
-    Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
-                  batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
+    // Serial.printf("Battery: %.2fV (%.0f%%), Status: %s\n",
+    //               batteryVoltage, batteryPercentage, getBatteryStatusString().c_str());
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnect");
       WiFi.disconnect();
