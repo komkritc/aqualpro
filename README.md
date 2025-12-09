@@ -1,4 +1,4 @@
-# AquaLevel Pro – ESP32 Aqual Level Monitor
+# Aqual Pro – ESP32 Aqual Level Monitor
 ![Dashboard Screenshot](/images/mainscreen.gif)
 
 A smart, battery-aware water level monitoring system for residential or industrial tanks—built on ESP32 with deep sleep, MQTT, OTA updates, and a responsive web dashboard.
